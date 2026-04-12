@@ -1,0 +1,4 @@
+[
+  {"address": "0xBFC02324", "reason": "addr=0xBFC0233C raw=0x44801000 opcode=0x11: top-level opcode 0x11 not implemented in Phase 1a"},
+  {"address": "0xBFC33CC0", "reason": "addr=0xBFC33CCC raw=0x012A4822 opcode=0x00: SPECIAL funct 0x22 not implemented in Phase 1a strict translator"}
+]
