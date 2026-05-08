@@ -8821,12 +8821,17 @@ static uint32_t normalize(uint32_t addr) {
 }
 
 extern int dirty_ram_dispatch(CPUState* cpu, uint32_t addr);
+extern void fntrace_record(CPUState* cpu, uint32_t target);
 
 void psx_dispatch(CPUState* cpu, uint32_t addr) {
     /* Tail-call trampoline: functions signal tail calls by setting
      * cpu->pc to the target and returning. We loop here to re-dispatch
      * without growing the native stack. */
     for (;;) {
+        /* Always-on call ring: every iteration counts as a separate
+         * call (initial entry + each tail-call re-dispatch). a0..a3
+         * reflect the args being passed for THIS iteration. */
+        fntrace_record(cpu, addr);
         cpu->pc = 0;
         uint32_t phys = normalize(addr);
         int lo = 0, hi = 4390 - 1;
