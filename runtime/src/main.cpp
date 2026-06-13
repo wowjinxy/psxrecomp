@@ -1417,6 +1417,13 @@ int main(int argc, char** argv) {
             g_video_aspect_den = gc.runtime.video_aspect_den;
             g_ws_anchor_addr   = gc.ws_sprite_anchor_addr;
             g_ws_hud_sprt      = gc.ws_hud_sprt_squash;
+            /* Register the [widescreen.backdrop] store PCs so the dirty-RAM
+             * interpreter applies the backdrop screenX squash on the interp
+             * path (overlay backdrop handlers run interpreted when no cache
+             * DLL is loaded — the recompiler emit only covers native). */
+            if (!gc.ws_backdrop_x_sites.empty())
+                psx_ws_set_backdrop_sites(gc.ws_backdrop_x_sites.data(),
+                                          (int)gc.ws_backdrop_x_sites.size());
             g_audio_spu_hq     = gc.runtime.audio_spu_hq;
             { const char *e = std::getenv("PSX_GL_FORCE_CPU_PRESENT");
               if (e && e[0] && e[0] != '0') g_gl_fbo_present = 0; }
