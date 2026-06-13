@@ -105,6 +105,15 @@ struct RuntimeConfig {
     // PSX_SCREEN env var overrides this at runtime (debug path).
     int                   video_screen_kind = 0;
 
+    // aspect_ratio: display aspect "W:H" (default "4:3" = native). A wider
+    // aspect (e.g. "16:9") enables the widescreen hack: the GTE squashes
+    // screen-X by (4*H)/(3*W) around the game's projection centre and the
+    // present path stretches the 4:3 frame to W:H — net effect is a wider
+    // field of view for GTE-projected geometry. Screen-space 2D (HUD, FMV,
+    // sprite widths) stretches; world geometry keeps correct proportions.
+    int                   video_aspect_num = 4;
+    int                   video_aspect_den = 3;
+
     // ---- [audio] block ----
     // spu_hq: enable the SPU float-shadow re-render (Catmull-Rom resample, float
     // headroom). Verified-enhancement, default OFF — spu_render output is
@@ -217,6 +226,8 @@ struct UserSettings {
     bool has_antialiasing   = false; bool antialiasing   = true;
     bool has_texture_filter = false; int  texture_filter = 0; // 0=nearest,1=bilinear
     bool has_screen_kind    = false; int  screen_kind    = 0; // 0..3 (ScreenKind)
+    bool has_aspect_ratio   = false; int  aspect_num     = 4; // display aspect W:H
+                                     int  aspect_den     = 3; // (4:3 = native)
     // [audio]
     bool has_spu_hq         = false; bool spu_hq         = false;
     // [bios] / [disc] / [memcard]
