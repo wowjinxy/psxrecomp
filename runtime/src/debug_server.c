@@ -244,6 +244,32 @@ static uint32_t s_wtrace_trans_head = 0;
 static struct { uint32_t lo, hi; } s_wtrace_trans_ranges[WTRACE_TRANS_MAX_RANGES];
 static int s_wtrace_trans_range_count = 0;
 
+/* ---- read-trace ring (ARMED-RANGE ONLY) -------------------------------------
+ * Reads vastly outnumber writes, so unlike wtrace_all this ring is NEVER
+ * always-on: it records only RAM reads whose phys addr falls in an armed range.
+ * The fast path is a single `range_count==0` compare, so a disarmed read-trace
+ * costs ~nothing.  Used to find the code that READS a value (e.g. the canonical
+ * option-config global behind a per-frame display mirror).  Each entry carries
+ * the reading function (g_debug_current_func_addr) so the reader is identifiable
+ * in Ghidra without per-load PC emitter instrumentation. */
+#define RTRACE_MAX_RANGES 16
+#define RTRACE_CAP (1u << 20)   /* 1M entries (~28 MB), allocated on first arm */
+typedef struct {
+    uint64_t seq;
+    uint32_t addr;
+    uint32_t val;
+    uint32_t func_addr;
+    uint32_t ra;
+    uint32_t frame;
+    uint8_t  w;
+    uint8_t  pad[3];
+} ReadTraceEntry;
+static ReadTraceEntry *s_rtrace = NULL;
+static uint64_t s_rtrace_seq  = 0;
+static uint32_t s_rtrace_head = 0;
+static struct { uint32_t lo, hi; } s_rtrace_ranges[RTRACE_MAX_RANGES];
+static int s_rtrace_range_count = 0;
+
 /* Function attribution global — set by psx_dispatch() before each call. */
 uint32_t g_debug_current_func_addr = 0;
 
@@ -6061,6 +6087,124 @@ void debug_server_trace_write_check(uint32_t phys, uint32_t old_val,
     }
 }
 
+/* RAM read trace — called from memory.c psx_read_word/half/byte (RAM branch).
+ * Fast no-op when no range is armed. */
+void debug_server_trace_read_check(uint32_t phys, uint32_t val, uint8_t width)
+{
+#ifdef PSX_NO_DEBUG_TOOLS
+    (void)phys; (void)val; (void)width;
+    return;
+#else
+    if (s_rtrace_range_count == 0 || !s_rtrace) return;
+    for (int i = 0; i < s_rtrace_range_count; i++) {
+        if (phys >= s_rtrace_ranges[i].lo && phys < s_rtrace_ranges[i].hi) {
+            ReadTraceEntry *e = &s_rtrace[s_rtrace_head];
+            e->seq       = s_rtrace_seq++;
+            e->addr      = phys;
+            e->val       = val;
+            e->func_addr = g_debug_current_func_addr;
+            e->ra        = debug_cpu_ptr ? debug_cpu_ptr->gpr[31] : 0;
+            e->frame     = (uint32_t)s_frame_count;
+            e->w         = width;
+            s_rtrace_head = (s_rtrace_head + 1) % RTRACE_CAP;
+            return;
+        }
+    }
+#endif
+}
+
+static void handle_rtrace_arm(int id, const char *json)
+{
+    char lo_str[32], hi_str[32];
+    if (!json_get_str(json, "addr_lo", lo_str, sizeof(lo_str)) &&
+        !json_get_str(json, "lo", lo_str, sizeof(lo_str))) { send_err(id, "missing addr_lo"); return; }
+    if (!json_get_str(json, "addr_hi", hi_str, sizeof(hi_str)) &&
+        !json_get_str(json, "hi", hi_str, sizeof(hi_str))) { send_err(id, "missing addr_hi"); return; }
+    uint32_t lo = hex_to_u32(lo_str) & 0x1FFFFFFFu;
+    uint32_t hi = hex_to_u32(hi_str) & 0x1FFFFFFFu;
+    if (s_rtrace_range_count >= RTRACE_MAX_RANGES) { send_err(id, "rtrace ranges full"); return; }
+    if (!s_rtrace) {
+        s_rtrace = (ReadTraceEntry *)calloc(RTRACE_CAP, sizeof(ReadTraceEntry));
+        if (!s_rtrace) { send_err(id, "rtrace alloc failed"); return; }
+    }
+    s_rtrace_ranges[s_rtrace_range_count].lo = lo;
+    s_rtrace_ranges[s_rtrace_range_count].hi = hi;
+    s_rtrace_range_count++;
+    send_fmt("{\"id\":%d,\"ok\":true,\"lo\":\"0x%08X\",\"hi\":\"0x%08X\",\"ranges\":%d}",
+             id, lo, hi, s_rtrace_range_count);
+}
+
+static void handle_rtrace_disarm_all(int id, const char *json)
+{
+    (void)json;
+    s_rtrace_range_count = 0;
+    send_ok(id);
+}
+
+static void handle_rtrace_reset(int id, const char *json)
+{
+    (void)json;
+    s_rtrace_seq = 0;
+    s_rtrace_head = 0;
+    send_ok(id);
+}
+
+static void handle_rtrace_stats(int id, const char *json)
+{
+    (void)json;
+    send_fmt("{\"id\":%d,\"ok\":true,\"total\":%llu,\"capacity\":%u,\"ranges\":%d}",
+             id, (unsigned long long)s_rtrace_seq, RTRACE_CAP, s_rtrace_range_count);
+}
+
+static void handle_rtrace_dump(int id, const char *json)
+{
+    if (!s_rtrace) { send_err(id, "rtrace not armed"); return; }
+    char lo_str[32], hi_str[32];
+    uint32_t flo = 0, fhi = 0xFFFFFFFFu;
+    if (json_get_str(json, "addr_lo", lo_str, sizeof(lo_str))) flo = hex_to_u32(lo_str) & 0x1FFFFFFFu;
+    if (json_get_str(json, "addr_hi", hi_str, sizeof(hi_str))) fhi = hex_to_u32(hi_str) & 0x1FFFFFFFu;
+
+    uint64_t total = s_rtrace_seq;
+    uint32_t avail = (total < RTRACE_CAP) ? (uint32_t)total : RTRACE_CAP;
+    uint32_t start = (total < RTRACE_CAP) ? 0 : s_rtrace_head;
+    int max_out = json_get_int(json, "count", 256);
+    if (max_out < 1) max_out = 1;
+    if (max_out > 2048) max_out = 2048;
+    int newest_first = json_get_int(json, "newest", 0) != 0;
+
+    const uint32_t MAX_OUT = (uint32_t)max_out;
+    size_t BUF_SZ = 256u + (size_t)MAX_OUT * 200u;
+    if (BUF_SZ > (size_t)64 * 1024 * 1024) BUF_SZ = (size_t)64 * 1024 * 1024;
+    char *buf = (char *)malloc(BUF_SZ);
+    if (!buf) { send_err(id, "oom"); return; }
+    size_t pos = 0;
+    uint32_t emitted = 0;
+    pos += snprintf(buf + pos, BUF_SZ - pos,
+                    "{\"id\":%d,\"ok\":true,\"total\":%llu,\"available\":%u,\"entries\":[",
+                    id, (unsigned long long)total, avail);
+    for (uint32_t i = 0; i < avail && emitted < MAX_OUT && pos < BUF_SZ - 256; i++) {
+        uint32_t idx;
+        if (newest_first) {
+            uint32_t newest = (s_rtrace_head + RTRACE_CAP - 1u) % RTRACE_CAP;
+            idx = (newest + RTRACE_CAP - (i % RTRACE_CAP)) % RTRACE_CAP;
+        } else {
+            idx = (start + i) % RTRACE_CAP;
+        }
+        ReadTraceEntry *e = &s_rtrace[idx];
+        if (e->addr < flo || e->addr >= fhi) continue;
+        pos += snprintf(buf + pos, BUF_SZ - pos,
+                        "%s{\"seq\":%llu,\"addr\":\"0x%08X\",\"val\":\"0x%08X\","
+                        "\"func\":\"0x%08X\",\"ra\":\"0x%08X\",\"frame\":%u,\"w\":%u}",
+                        (emitted == 0) ? "" : ",",
+                        (unsigned long long)e->seq, e->addr, e->val,
+                        e->func_addr, e->ra, e->frame, (unsigned)e->w);
+        emitted++;
+    }
+    pos += snprintf(buf + pos, BUF_SZ - pos, "],\"emitted\":%u}", emitted);
+    debug_server_send_line(buf);
+    free(buf);
+}
+
 /* MMIO write trace — called from memory.c mmio_write32/16/8. */
 void debug_server_trace_mmio_write(uint32_t addr, uint32_t val, uint8_t width)
 {
@@ -8529,6 +8673,12 @@ static const CmdEntry s_commands[] = {
     { "wtrace_trans_dump",   handle_wtrace_trans_dump },
     { "wtrace_trans_stats",  handle_wtrace_trans_stats },
     { "wtrace_trans_reset",  handle_wtrace_trans_reset },
+    /* Armed-range READ trace (find code that reads a value). */
+    { "rtrace_arm",          handle_rtrace_arm },
+    { "rtrace_disarm_all",   handle_rtrace_disarm_all },
+    { "rtrace_reset",        handle_rtrace_reset },
+    { "rtrace_stats",        handle_rtrace_stats },
+    { "rtrace_dump",         handle_rtrace_dump },
     { "call_focus_dump",     handle_call_focus_dump },
     { "call_focus_stats",    handle_call_focus_stats },
     { "call_focus_reset",    handle_call_focus_reset },

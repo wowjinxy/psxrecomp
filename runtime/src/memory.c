@@ -239,6 +239,8 @@ const ImaskTraceEntry *memory_get_imask_trace(int *idx_out, int *count_out) {
 extern void debug_server_trace_write_check(uint32_t phys, uint32_t old_val,
                                            uint32_t new_val, uint8_t width);
 extern void debug_server_trace_mmio_write(uint32_t addr, uint32_t val, uint8_t width);
+/* Armed-range RAM read trace (no-op when no range armed / release build). */
+extern void debug_server_trace_read_check(uint32_t phys, uint32_t val, uint8_t width);
 extern CPUState *debug_cpu_ptr;
 extern uint32_t g_debug_last_store_pc;
 
@@ -574,10 +576,14 @@ uint32_t psx_read_word(uint32_t addr) {
     uint32_t phys = addr & 0x1FFFFFFFu;
 
     if (phys < RAM_SIZE) {
-        return  (uint32_t)ram[phys]
+        uint32_t v = (uint32_t)ram[phys]
              | ((uint32_t)ram[phys + 1] << 8)
              | ((uint32_t)ram[phys + 2] << 16)
              | ((uint32_t)ram[phys + 3] << 24);
+#ifndef PSX_NO_DEBUG_TOOLS
+        debug_server_trace_read_check(phys, v, 4);
+#endif
+        return v;
     }
     /* Expansion 1: 0x1F000000..0x1F7FFFFF — no device, open bus */
     if (phys >= 0x1F000000u && phys <= 0x1F7FFFFFu) {
@@ -656,7 +662,11 @@ uint16_t psx_read_half(uint32_t addr) {
     uint32_t phys = addr & 0x1FFFFFFFu;
 
     if (phys < RAM_SIZE) {
-        return (uint16_t)ram[phys] | ((uint16_t)ram[phys + 1] << 8);
+        uint16_t v = (uint16_t)ram[phys] | ((uint16_t)ram[phys + 1] << 8);
+#ifndef PSX_NO_DEBUG_TOOLS
+        debug_server_trace_read_check(phys, (uint32_t)v, 2);
+#endif
+        return v;
     }
     if (phys >= 0x1F000000u && phys <= 0x1F7FFFFFu) return 0xFFFFu;
     if (phys >= 0x1F800000u && phys <= 0x1F8003FFu) {
@@ -712,6 +722,9 @@ uint8_t psx_read_byte(uint32_t addr) {
     uint32_t phys = addr & 0x1FFFFFFFu;
 
     if (phys < RAM_SIZE) {
+#ifndef PSX_NO_DEBUG_TOOLS
+        debug_server_trace_read_check(phys, (uint32_t)ram[phys], 1);
+#endif
         return ram[phys];
     }
     if (phys >= 0x1F000000u && phys <= 0x1F7FFFFFu) return 0xFFu;
