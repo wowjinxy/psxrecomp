@@ -145,6 +145,45 @@ uint32_t FunctionAnalyzer::find_function_start(uint32_t return_addr) {
 
     uint32_t search_addr = return_addr;
     const uint32_t max_search = 4096; // Search up to 4096 instructions backward (16 KB)
+    const uint32_t max_preprologue_bytes = 32;
+
+    auto extend_to_previous_return_boundary = [&](uint32_t prologue_addr) -> uint32_t {
+        uint32_t limit = exe_.header.load_address;
+        if (prologue_addr > exe_.header.load_address + max_preprologue_bytes) {
+            limit = prologue_addr - max_preprologue_bytes;
+        }
+
+        for (uint32_t probe = prologue_addr; probe > limit; ) {
+            probe -= 4;
+            auto word_opt = exe_.read_word(probe);
+            if (!word_opt.has_value()) break;
+            uint32_t word = *word_opt;
+
+            if (is_jr_ra(word)) {
+                uint32_t candidate = probe + 8u;  // skip delay slot
+                if (candidate >= prologue_addr) break;
+
+                bool straight_line_prelude = true;
+                for (uint32_t addr = candidate; addr < prologue_addr; addr += 4) {
+                    auto prelude_opt = exe_.read_word(addr);
+                    if (!prelude_opt.has_value() ||
+                        !is_valid_mips_word(*prelude_opt) ||
+                        is_branch_or_jump(*prelude_opt)) {
+                        straight_line_prelude = false;
+                        break;
+                    }
+                }
+                if (straight_line_prelude) return candidate;
+                break;
+            }
+
+            if (!is_valid_mips_word(word) || is_branch_or_jump(word)) {
+                break;
+            }
+        }
+
+        return prologue_addr;
+    };
 
     for (uint32_t i = 0; i < max_search; i++) {
         search_addr -= 4;
@@ -176,6 +215,13 @@ uint32_t FunctionAnalyzer::find_function_start(uint32_t return_addr) {
                     continue;  // delay slot, not a real prologue — keep scanning
                 }
             }
+
+            uint32_t return_boundary_start =
+                extend_to_previous_return_boundary(search_addr);
+            if (return_boundary_start != search_addr) {
+                return return_boundary_start;
+            }
+
             if (search_addr >= exe_.header.load_address + 8) {
                 auto prev2_opt = exe_.read_word(search_addr - 8);
                 auto prev1_opt = exe_.read_word(search_addr - 4);
