@@ -33,7 +33,8 @@ static void     wr_half(uint32_t a,uint16_t v){ memcpy(&g_ram[MASK(a)&~1u],&v,2)
 static uint8_t  rd_byte(uint32_t a){ return g_ram[MASK(a)]; }
 static void     wr_byte(uint32_t a,uint8_t v){ g_ram[MASK(a)]=v; }
 static void cpu_wire(CPUState*c){ c->read_word=rd_word;c->write_word=wr_word;
-    c->read_half=rd_half;c->write_half=wr_half;c->read_byte=rd_byte;c->write_byte=wr_byte; }
+    c->read_half=rd_half;c->write_half=wr_half;c->read_byte=rd_byte;c->write_byte=wr_byte;
+    overlay_sljit_init_helpers(c); }
 
 /* Deterministic, balanced call stub used by BOTH sides: a callee that does not
  * touch $sp, sets $v0 to a fixed value, restores nothing (the caller's frame is
@@ -44,6 +45,7 @@ int psx_sljit_call(CPUState*cpu,uint32_t target,uint32_t return_pc,int check){
     (void)check; g_calls++; cpu->gpr[2]=0x12340000u ^ target; cpu->gpr[31]=return_pc; cpu->pc=0; return 0; }
 void psx_sljit_cop2(CPUState*cpu,uint32_t insn){(void)cpu;(void)insn;}
 void psx_sljit_memx(CPUState*cpu,uint32_t insn){(void)cpu;(void)insn;}
+int psx_ws_cull_sltiu(uint32_t sx,uint32_t imm){ return sx < imm; }
 
 /* ---- reference MIPS interpreter (parallels dirty_ram_interp for this subset) */
 static uint32_t f_op(uint32_t i){return i>>26;} static uint32_t f_rs(uint32_t i){return(i>>21)&31;}

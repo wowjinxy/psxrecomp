@@ -32,6 +32,7 @@ static void cpu_init(CPUState *c){
     c->read_word = rd_word;  c->write_word = wr_word;
     c->read_half = rd_half;  c->write_half = wr_half;
     c->read_byte = rd_byte;  c->write_byte = wr_byte;
+    overlay_sljit_init_helpers(c);
 }
 
 /* Stand-in for the runtime call helper (overlay_loader.c) so jal/jalr shards
@@ -50,6 +51,7 @@ int psx_sljit_call(CPUState *cpu, uint32_t target, uint32_t return_pc, int check
 /* Link stubs for the GTE/unaligned helpers (validated live, not in the harness). */
 void psx_sljit_cop2(CPUState *cpu, uint32_t insn){ (void)cpu; (void)insn; }
 void psx_sljit_memx(CPUState *cpu, uint32_t insn){ (void)cpu; (void)insn; }
+int psx_ws_cull_sltiu(uint32_t sx, uint32_t imm){ return sx < imm; }
 
 /* ---- MIPS encoders ----------------------------------------------------- */
 #define ZERO 0

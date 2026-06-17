@@ -143,11 +143,10 @@ uint32_t overlay_loader_get_inprogress(void) { return s_native_inprogress; }
 static int  s_diff_mode = 0;
 static int  s_in_shadow = 0;
 /* Live sljit mode (PSX_OVERLAY_SLJIT_LIVE / sljit_live debug cmd): JIT overlay
- * functions on-miss and run them LIVE without the per-shard differential — the
- * production model (sljit is the sync on-miss producer; safety is the emitter's
- * decline-on-unsupported contract, validated broadly). Off by default; the diff
- * gate above stays the dev path. Lets a developer feel the real toolchain-less
- * player experience (pure sljit + interp floor, no gcc, no diff overhead). */
+ * functions on-miss and validate sljit shards through the same-state diff gate
+ * before native execution. This is the toolchain-less production model: safe
+ * shards graduate after clean diffs; device-touching or diverging shards stay on
+ * the interpreter. */
 static int  s_sljit_live = 0;
 void overlay_loader_set_sljit_live(int on) { s_sljit_live = on ? 1 : 0; }
 int  overlay_loader_get_sljit_live(void)   { return s_sljit_live; }
@@ -1329,6 +1328,7 @@ static ShadowDiv s_sdiv[SDIV_CAP];
 static int       s_sdiv_n = 0;
 static uint64_t  s_shadow_calls = 0;
 static uint64_t  s_shadow_divs  = 0;
+static uint64_t  s_shadow_blacklisted = 0;
 
 /* One-shot full-state capture of the FIRST divergence: complete native and
  * interp register files so the diverging path can be localized. */
@@ -1462,6 +1462,13 @@ static void run_shadow_diff(CPUState *cpu, Candidate *c, uint32_t addr) {
                 d->ram_interp = *(uint32_t *)&s_ramI[a];
             }
         }
+        if (c->dll < 0 && c->state != ENTRY_BLACKLIST) {
+            if (c->state == ENTRY_VALID && s_valid_count > 0) s_valid_count--;
+            c->state = ENTRY_BLACKLIST;
+            s_shadow_blacklisted++;
+            loader_log("sljit shard blacklisted after shadow divergence 0x%08X",
+                       c->addr);
+        }
     }
     /* Restore the interp result as the authoritative live state (native discarded).
      * A bail raised by the shadow run must never leak into live execution (a
@@ -1500,10 +1507,11 @@ int overlay_loader_dump_shadow(char *out, int cap) {
     int n = 0;
     n += snprintf(out + n, cap - n,
         "{\"diff_mode\":%d,\"shadow_calls\":%llu,\"divergences\":%llu,"
-        "\"skipped_device\":%llu,\"records\":[",
+        "\"skipped_device\":%llu,\"blacklisted\":%llu,\"records\":[",
         s_diff_mode, (unsigned long long)s_shadow_calls,
         (unsigned long long)s_shadow_divs,
-        (unsigned long long)s_shadow_skipped_dev);
+        (unsigned long long)s_shadow_skipped_dev,
+        (unsigned long long)s_shadow_blacklisted);
     for (int i = 0; i < s_sdiv_n && n < cap - 200; i++) {
         ShadowDiv *d = &s_sdiv[i];
         n += snprintf(out + n, cap - n,
