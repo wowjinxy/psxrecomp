@@ -627,6 +627,7 @@ static int read_sector_at(int min, int sec, int sect) {
     uint8_t user_data[SECTOR_SIZE];
     uint8_t raw_data[RAW_SECTOR_SIZE];
     int have_raw = 0;
+    int read_ok = 0;
     CDROMSectorDelivery delivery;
     const uint8_t *history_bytes = user_data;
     int history_size = SECTOR_SIZE;
@@ -635,11 +636,14 @@ static int read_sector_at(int min, int sec, int sect) {
         have_raw = iso_read_raw_sector(iso_handle, lba, raw_data, RAW_SECTOR_SIZE);
         if (have_raw) {
             memcpy(user_data, raw_data + RAW_USER_DATA_OFFSET, SECTOR_SIZE);
-        } else if (!iso_read_sector(iso_handle, lba, user_data, SECTOR_SIZE)) {
-            memset(user_data, 0, sizeof(user_data));
+            read_ok = 1;
+        } else if (iso_read_sector(iso_handle, lba, user_data, SECTOR_SIZE)) {
+            read_ok = 1;
         }
-    } else {
-        memset(user_data, 0, sizeof(user_data));
+    }
+    if (!read_ok) {
+        trace_cdrom('E', 0, (uint32_t)lba, 0);
+        return -1;
     }
 
     delivery = classify_raw_sector(raw_data, have_raw);
@@ -755,6 +759,16 @@ static void stop_read_stream(void) {
 
 static int deliver_read_sector(void) {
     int delivered = read_sector_at(read_min, read_sec, read_sect);
+    if (delivered < 0) {
+        stop_read_stream();
+        clear_sector_buffer();
+        stat_reg &= (uint8_t)~CDSTAT_READ;
+        response_clear();
+        response_push((uint8_t)(stat_reg | CDSTAT_ERROR | CDSTAT_SEEKERR));
+        set_irq(CDIRQ_ERROR);
+        fire_cdrom_irq();
+        return -1;
+    }
     advance_msf(&read_min, &read_sec, &read_sect);
     if (!delivered) return 0;
     response_clear();
@@ -801,6 +815,20 @@ static void exec_command(uint8_t cmd) {
         start_read_stream(cmd);
         response_push(stat_reg);
         set_irq(CDIRQ_ACK);
+        break;
+
+    case 0x08: /* Stop */
+        stop_read_stream();
+        clear_sector_buffer();
+        xa_reset_decode();
+        spu_cd_audio_reset();
+        stat_reg &= (uint8_t)~(CDSTAT_READ | CDSTAT_PLAY | CDSTAT_SEEK);
+        response_push(stat_reg);
+        set_irq(CDIRQ_ACK);
+        pending.cmd = 0x08;
+        pending.pending = 1;
+        pending.delay = apply_speed(100000);
+        pending.phase = 1;
         break;
 
     case 0x09: /* Pause */
@@ -1007,6 +1035,15 @@ static void process_pending(uint32_t cycles) {
     case 0x1B: /* ReadS data ready */
         if (reading) {
             int delivered = read_sector_at(read_min, read_sec, read_sect);
+            if (delivered < 0) {
+                stop_read_stream();
+                clear_sector_buffer();
+                stat_reg &= (uint8_t)~CDSTAT_READ;
+                response_push((uint8_t)(stat_reg | CDSTAT_ERROR | CDSTAT_SEEKERR));
+                set_irq(CDIRQ_ERROR);
+                fire_cdrom_irq();
+                break;
+            }
             advance_msf(&read_min, &read_sec, &read_sect);
             if (delivered) {
                 response_push(stat_reg);
@@ -1014,6 +1051,13 @@ static void process_pending(uint32_t cycles) {
                 fire_cdrom_irq();
             }
         }
+        break;
+
+    case 0x08: /* Stop complete */
+        stat_reg &= (uint8_t)~(CDSTAT_READ | CDSTAT_PLAY | CDSTAT_SEEK);
+        response_push(stat_reg);
+        set_irq(CDIRQ_COMPLETE);
+        fire_cdrom_irq();
         break;
 
     case 0x09: /* Pause complete */

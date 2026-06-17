@@ -3797,6 +3797,7 @@ static const char *cdrom_trace_kind_name(uint8_t kind)
     case 'a': return "xa_skip";
     case 'X': return "xa_unsupported";
     case 'O': return "overwrite";
+    case 'E': return "read_error";
     case 'R': return "read";
     case 'W': return "write";
     case 'D': return "dma";

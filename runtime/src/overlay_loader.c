@@ -177,6 +177,25 @@ extern uint32_t overlay_watch_pagegen_sum(uint32_t phys, uint32_t len);
 
 /* ---- Per-candidate hash / generation over its code ranges -------------- */
 
+enum { OVERLAY_RAM_SIZE = 2u * 1024u * 1024u };
+
+static uint32_t ram_word_at(const uint8_t *ram, uint32_t phys) {
+    return (uint32_t)ram[phys]
+         | ((uint32_t)ram[phys + 1] << 8)
+         | ((uint32_t)ram[phys + 2] << 16)
+         | ((uint32_t)ram[phys + 3] << 24);
+}
+
+static int live_entry_zero_stream(uint32_t phys) {
+    const uint8_t *ram = memory_get_ram_ptr();
+    phys &= 0x1FFFFFFFu;
+    if (!ram || phys + 16u > OVERLAY_RAM_SIZE) return 0;
+    return ram_word_at(ram, phys) == 0u &&
+           ram_word_at(ram, phys + 4u) == 0u &&
+           ram_word_at(ram, phys + 8u) == 0u &&
+           ram_word_at(ram, phys + 12u) == 0u;
+}
+
 static uint32_t cand_crc(const Candidate *c) {
     const uint8_t *ram = memory_get_ram_ptr();
     uint32_t crc = 0xFFFFFFFFu;
@@ -342,6 +361,11 @@ static void cand_register(uint32_t phys, OverlayFn fn, const ManFn *m, int dll) 
 static void register_sljit_candidate(uint32_t phys, OverlayFn fn,
                                      uint32_t lo, uint32_t len, uint32_t crc_override) {
     if (s_cand_n >= CAND_CAP || len == 0) return;
+    if (!crc_override && live_entry_zero_stream(phys)) {
+        loader_log("sljit shard rejected for zero-filled entry 0x%08X",
+                   phys & 0x1FFFFFFFu);
+        return;
+    }
     int idx = s_cand_n++;
     Candidate *c = &s_cand[idx];
     c->addr        = phys & 0x1FFFFFFFu;
@@ -410,6 +434,10 @@ static void try_sljit_region(uint32_t addr) {
     sljit_mark_tried(phys, gen);
     uint8_t *ram = memory_get_ram_ptr();
     if (!ram) return;
+    if (live_entry_zero_stream(phys)) {
+        loader_log("sljit compile skipped for zero-filled entry 0x%08X", phys);
+        return;
+    }
     CompiledFragment frag = {0};
     /* Decode from live RAM: bytes = RAM base, image_base_vram = 0 ⇒ byte offset =
      * (entry & 0x1FFFFFFF) = phys. Pass the VIRTUAL entry so return_pc and
@@ -1040,6 +1068,14 @@ scan_candidates:
         s_last_crc = live;
         c->val_gen = cand_gensum(c);
         if (live == c->crc_code) {
+            if (live_entry_zero_stream(c->addr)) {
+                if (c->state == ENTRY_VALID && s_valid_count > 0) s_valid_count--;
+                c->state = ENTRY_BLACKLIST;
+                s_stale_blocked++;
+                loader_log("overlay candidate blocked for zero-filled entry 0x%08X",
+                           c->addr);
+                continue;
+            }
             if (c->state != ENTRY_VALID) {
                 c->state = ENTRY_VALID;
                 s_revalidations++;              /* reload-on-return */
@@ -1064,7 +1100,7 @@ scan_candidates:
              * executing I/O — the save-load wedge). gcc candidates (dll >= 0) are
              * the trusted tier (validated at dev time) and run native directly;
              * they are diffed only in explicit dev diff mode. */
-            int want_diff = s_diff_mode; /* live SLJIT skips shadow diff unless explicitly requested */
+            int want_diff = s_diff_mode || (s_sljit_live && c->dll < 0);
             if (want_diff && !s_in_shadow && c->diff_passes < OVERLAY_DIFF_BUDGET) {
                 run_shadow_diff(cpu, c, addr);
                 return 1;
