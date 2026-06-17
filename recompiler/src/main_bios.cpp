@@ -438,6 +438,110 @@ std::vector<PSXRecompV4::Seed> load_seeds(const fs::path& seed_path) {
     return seeds;
 }
 
+uint32_t read_rom_u32_le(const std::vector<uint8_t>& rom,
+                         uint32_t base_addr,
+                         uint32_t addr) {
+    uint32_t offset = addr - base_addr;
+    return static_cast<uint32_t>(rom[offset + 0])
+         | (static_cast<uint32_t>(rom[offset + 1]) << 8)
+         | (static_cast<uint32_t>(rom[offset + 2]) << 16)
+         | (static_cast<uint32_t>(rom[offset + 3]) << 24);
+}
+
+std::set<uint32_t> collect_direct_noncall_targets(const std::vector<uint8_t>& rom,
+                                                  uint32_t base_addr,
+                                                  uint32_t rom_end) {
+    std::set<uint32_t> targets;
+    auto in_rom = [&](uint32_t addr) {
+        return addr >= base_addr && addr <= rom_end && (addr & 3u) == 0u;
+    };
+
+    for (uint32_t addr = base_addr; addr + 4u <= rom_end + 1u; addr += 4u) {
+        uint32_t raw = read_rom_u32_le(rom, base_addr, addr);
+        uint32_t op = (raw >> 26) & 0x3Fu;
+        uint32_t target = 0;
+        bool has_target = false;
+
+        if ((op >= 0x04u && op <= 0x07u) || op == 0x01u) {
+            int16_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+            target = static_cast<uint32_t>(
+                static_cast<int64_t>(addr) + 4 + (static_cast<int64_t>(simm) * 4));
+            has_target = true;
+        } else if (op == 0x02u) {
+            target = ((addr + 4u) & 0xF0000000u) | ((raw & 0x03FFFFFFu) << 2);
+            has_target = true;
+        } else if ((op == 0x10u || op == 0x11u || op == 0x12u) &&
+                   ((raw >> 21) & 0x1Fu) == 0x08u) {
+            int16_t simm = static_cast<int16_t>(raw & 0xFFFFu);
+            target = static_cast<uint32_t>(
+                static_cast<int64_t>(addr) + 4 + (static_cast<int64_t>(simm) * 4));
+            has_target = true;
+        }
+
+        if (has_target && in_rom(target)) targets.insert(target);
+    }
+
+    return targets;
+}
+
+std::vector<PSXRecompV4::Seed> discover_return_boundary_leaf_seeds(
+    const std::vector<uint8_t>& rom,
+    uint32_t base_addr,
+    uint32_t rom_end,
+    const std::vector<PSXRecompV4::Seed>& seeds) {
+
+    constexpr uint32_t kMaxLeafBytes = 0x80u;
+    constexpr uint32_t kMaxLeafInstructions = 48u;
+    std::vector<PSXRecompV4::Seed> extra;
+
+    std::set<uint32_t> known_entries;
+    for (const auto& seed : seeds) known_entries.insert(seed.address);
+    const std::set<uint32_t> direct_targets =
+        collect_direct_noncall_targets(rom, base_addr, rom_end);
+
+    for (uint32_t jr_addr = base_addr; jr_addr + 8u <= rom_end; jr_addr += 4u) {
+        uint32_t raw = read_rom_u32_le(rom, base_addr, jr_addr);
+        if (raw != 0x03E00008u) continue;  // jr $ra
+
+        uint32_t candidate = jr_addr + 8u;  // after delay slot
+        if (candidate > rom_end || known_entries.count(candidate)) continue;
+        if (direct_targets.count(candidate)) continue;
+
+        uint64_t local_cap64 = std::min<uint64_t>(
+            static_cast<uint64_t>(rom_end) + 1u,
+            static_cast<uint64_t>(candidate) + kMaxLeafBytes);
+        uint32_t hard_cap = static_cast<uint32_t>(local_cap64);
+        auto next_known = known_entries.upper_bound(candidate);
+        if (next_known != known_entries.end() && *next_known < hard_cap) {
+            hard_cap = *next_known;
+        }
+        if (hard_cap <= candidate + 4u) continue;
+
+        auto walk = PSXRecompV4::FunctionDiscovery::walk_function(
+            rom, base_addr, rom_end, candidate, hard_cap, "auto_return_boundary_leaf");
+        if (!walk.unsupported.empty() || !walk.edges.empty() ||
+            !walk.indirect_jumps.empty() || walk.instructions.empty() ||
+            walk.instructions.size() > kMaxLeafInstructions) {
+            continue;
+        }
+        if (walk.exit_types.size() != 1 || !walk.exit_types.count("jr_ra")) {
+            continue;
+        }
+        if (walk.end_addr == 0u || walk.end_addr >= hard_cap) {
+            continue;
+        }
+
+        known_entries.insert(candidate);
+        extra.push_back({
+            candidate,
+            fmt::format("auto_leaf_{:08X}", candidate),
+            "short return-boundary leaf helper discovered after jr $ra"
+        });
+    }
+
+    return extra;
+}
+
 // ----- Phase 1c: artifact emission -----------------------------------------
 
 std::string make_function_manifest_json(const PSXRecompV4::DiscoveryResult& dr,
@@ -763,6 +867,16 @@ int run_emit_full(const fs::path& bios_path, const fs::path& out_dir,
         std::fprintf(stdout,
             "psxrecomp-bios: seeded %zu additional bios vector/alias targets\n",
             added);
+    }
+
+    {
+        auto leaf_seeds = discover_return_boundary_leaf_seeds(
+            rom, kBiosBase, kBiosBase + static_cast<uint32_t>(kBiosSize) - 1,
+            seeds);
+        for (auto& seed : leaf_seeds) seeds.push_back(std::move(seed));
+        std::fprintf(stdout,
+            "psxrecomp-bios: seeded %zu return-boundary leaf targets\n",
+            leaf_seeds.size());
     }
 
     // 3. Run discovery.

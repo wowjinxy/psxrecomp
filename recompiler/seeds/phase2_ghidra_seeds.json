@@ -1,7 +1,7 @@
 {
   "schema": "psxrecomp phase2 seeds",
   "source": "generated/ghidra_function_starts.json + phase1c seeds + dispatch_miss_seeds + preserved manual",
-  "seed_count": 1076,
+  "seed_count": 1074,
   "seeds": [
     {
       "address": "0xBFC00000",
@@ -3524,19 +3524,9 @@
       "rationale": "JAL target from code region"
     },
     {
-      "address": "0xBFC02230",
-      "label": "dmiss_BFC02230",
-      "rationale": "PaRappa BIOS dispatch miss. Tiny leaf helper immediately after return at 0xBFC02228; stores a0 to 0xA0019010 and returns."
-    },
-    {
       "address": "0xBFC02918",
       "label": "card_copy_dispatch_miss_2026_05_05",
       "rationale": "Runtime dispatch miss: 8 hits during YES/NO COPY confirm execution. BANDAID per user permission."
-    },
-    {
-      "address": "0xBFC02B8C",
-      "label": "dmiss_BFC02B8C",
-      "rationale": "PaRappa BIOS dispatch miss. Tiny memset-style leaf helper immediately after return at 0xBFC02B84; runtime reached it through indirect BIOS dispatch."
     },
     {
       "address": "0xBFC03FC0",
