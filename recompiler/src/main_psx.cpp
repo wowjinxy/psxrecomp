@@ -6,6 +6,7 @@
 #include <string>
 #include <algorithm>
 #include <set>
+#include <vector>
 
 #include "ps1_exe_parser.h"
 #include "gte.h"
@@ -98,6 +99,8 @@ int main(int argc, char** argv) {
     std::set<uint32_t>    ws_backdrop_unsquash; // [widescreen.backdrop] unsquash_funcs
     bool                  ws_auto_screen_x_cull = false; // [widescreen.cull] auto_screen_x
     std::set<uint32_t>    persist_init_sites;   // [persist_options] init-store hooks (game_options.toml)
+    uint32_t              config_entry_pc = 0;
+    bool                  have_config_entry_pc = false;
     std::filesystem::path out_dir = "generated";
 
     if (!config_path.empty()) {
@@ -106,6 +109,8 @@ int main(int argc, char** argv) {
         extra_funcs_storage  = cfg.seeds_path.string();
         extra_funcs_path     = extra_funcs_storage.c_str();
         out_dir              = cfg.out_dir;
+        config_entry_pc      = cfg.entry_pc;
+        have_config_entry_pc = true;
         ws_tag_funcs.insert(cfg.ws_sprite_tag_funcs.begin(),
                             cfg.ws_sprite_tag_funcs.end());
         ws_cull_bias.insert(cfg.ws_cull_bias_sites.begin(), cfg.ws_cull_bias_sites.end());
@@ -801,10 +806,39 @@ int main(int argc, char** argv) {
         ds << fmt::format("    return phys >= 0x{:08X}u && phys < 0x{:08X}u;\n",
                           game_text_start, game_text_end);
         ds << "}\n\n";
+        ds << "static uint32_t psx_game_dispatch_key(uint32_t addr) {\n";
+        ds << "    uint32_t phys = addr & 0x1FFFFFFFu;\n";
+        ds << "    return 0x80000000u | phys;\n";
+        ds << "}\n\n";
+
+        uint32_t game_entry_pc = have_config_entry_pc
+            ? config_entry_pc
+            : exe->header.initial_pc;
+        std::vector<std::pair<uint32_t, uint32_t>> game_entry_sig;
+        for (uint32_t i = 0; i < 4; i++) {
+            uint32_t sig_addr = game_entry_pc + i * 4u;
+            auto word = exe->read_word(sig_addr);
+            if (!word) break;
+            game_entry_sig.push_back({sig_addr, *word});
+        }
+
+        ds << "static int psx_game_image_loaded(CPUState* cpu) {\n";
+        if (game_entry_sig.empty()) {
+            ds << "    return 0;\n";
+        } else {
+            for (const auto& [sig_addr, word] : game_entry_sig) {
+                ds << fmt::format(
+                    "    if (cpu->read_word(0x{:08X}u) != 0x{:08X}u) return 0;\n",
+                    sig_addr, word);
+            }
+            ds << "    return 1;\n";
+        }
+        ds << "}\n\n";
 
         ds << "/* Maps PS1 address to compiled game code. Returns 1 if dispatched, 0 if unknown. */\n";
         ds << "int psx_dispatch_game_compiled(CPUState* cpu, uint32_t addr) {\n";
-        ds << "    switch (addr) {\n";
+        ds << "    if (!psx_game_image_loaded(cpu)) return 0;\n";
+        ds << "    switch (psx_game_dispatch_key(addr)) {\n";
         for (uint32_t addr : dispatch_addrs) {
             ds << fmt::format("        case 0x{:08X}u: func_{:08X}(cpu); return 1;\n",
                               addr, addr);

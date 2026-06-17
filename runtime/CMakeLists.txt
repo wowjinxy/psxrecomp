@@ -40,6 +40,15 @@ psxrecomp_add_runtime_target(psx-bomberman
     GAME_GENERATED_DISPATCH_C "${PSXRECOMP_ROOT}/generated/SLUS_008.23_dispatch.c"
 )
 
+psxrecomp_add_runtime_target(psx-parappa
+    DEBUG_PORT 4374
+    WINDOW_TITLE "PaRappa the Rapper"
+    DEFAULT_BIOS_PATH "${PSXRECOMP_ROOT}/bios/SCPH1001.BIN"
+    DEFAULT_GAME_CONFIG_PATH "${PSXRECOMP_ROOT}/games/parappa-the-rapper/game.toml"
+    GAME_GENERATED_FULL_C "${PSXRECOMP_ROOT}/generated/scus_941.83_full.c"
+    GAME_GENERATED_DISPATCH_C "${PSXRECOMP_ROOT}/generated/scus_941.83_dispatch.c"
+)
+
 if(NOT MSVC)
     psxrecomp_add_runtime_target(psx-oracle
         ORACLE

@@ -956,6 +956,7 @@ void FullFunctionEmitter::emit_dispatch(
     out += "extern void debug_server_trace_dispatch(uint32_t func_addr);\n\n";
     out += "#ifdef PSX_HAS_GAME_DISPATCH\n";
     out += "extern int psx_game_address_in_text(uint32_t addr);\n";
+    out += "extern int psx_dispatch_game_compiled(CPUState* cpu, uint32_t addr);\n";
     out += "#endif\n\n";
 
     // Forward declarations for all emitted functions.
@@ -1137,8 +1138,11 @@ void FullFunctionEmitter::emit_dispatch(
     out += "         * active game text range, route it through the game/dirty-RAM\n";
     out += "         * path before normalizing it to shell ROM. */\n";
     out += "        uint32_t game_phys = addr & 0x1FFFFFFFu;\n";
-    out += "        if (psx_game_address_in_text(addr) && dirty_ram_is_dirty(game_phys)) {\n";
-    out += "            found = dirty_ram_dispatch(cpu, addr, stop_addr);\n";
+    out += "        if (psx_game_address_in_text(addr)) {\n";
+    out += "            found = psx_dispatch_game_compiled(cpu, addr);\n";
+    out += "            if (!found && dirty_ram_is_dirty(game_phys)) {\n";
+    out += "                found = dirty_ram_dispatch(cpu, addr, stop_addr);\n";
+    out += "            }\n";
     out += "        }\n";
     out += "#endif\n";
     out += "        uint32_t phys = normalize(addr);\n";

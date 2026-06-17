@@ -171,10 +171,28 @@ static inline void overlay_watch_note_write(uint32_t phys, uint32_t size) {
     }
 }
 
-/* Memory control registers: 0x1F801000..0x1F80103F (16 words) + 0x1F801060 (RAM size).
+/* Memory control registers: 0x1F801000..0x1F80103F (16 words) +
+ * 0x1F801060..0x1F80106F (Memory Control 2 / reserved shadow).
  * Includes expansion base/size, COM_DELAY, SPU_DELAY, CDROM_DELAY etc. */
-static uint32_t mem_ctrl[16];   /* indices 0..15 → addresses 0x1F801000..0x1F80103C */
+static uint32_t mem_ctrl[16];   /* indices 0..15 -> addresses 0x1F801000..0x1F80103C */
 static uint32_t ram_size_reg;   /* 0x1F801060 */
+static uint32_t mem_ctrl2[3];   /* 0x1F801064, 0x1F801068, 0x1F80106C */
+
+static uint32_t mem_ctrl2_read_word(uint32_t addr) {
+    uint32_t idx = (addr - 0x1F801060u) >> 2;
+    return idx == 0 ? ram_size_reg : mem_ctrl2[idx - 1u];
+}
+
+static void mem_ctrl2_write_word(uint32_t addr, uint32_t val) {
+    uint32_t idx = (addr - 0x1F801060u) >> 2;
+    if (idx == 0) ram_size_reg = val;
+    else mem_ctrl2[idx - 1u] = val;
+}
+
+static void mem_ctrl2_write_masked(uint32_t aligned, uint32_t val, uint32_t mask) {
+    uint32_t cur = mem_ctrl2_read_word(aligned);
+    mem_ctrl2_write_word(aligned, (cur & ~mask) | (val & mask));
+}
 
 /* Cache control register (KSEG2: 0xFFFE0130). */
 static uint32_t cache_ctrl;
@@ -335,9 +353,9 @@ static uint32_t mmio_read32(uint32_t addr) {
     if (addr >= 0x1F801040u && addr <= 0x1F80105Fu) {
         return sio_read(addr);
     }
-    /* RAM size: 0x1F801060 */
-    if (addr == 0x1F801060u) {
-        return ram_size_reg;
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Cu) {
+        return mem_ctrl2_read_word(addr);
     }
     /* Interrupts: 0x1F801070, 0x1F801074 */
     if (addr == 0x1F801070u) { sio_tick(0); return i_stat; }
@@ -384,9 +402,9 @@ static void mmio_write32(uint32_t addr, uint32_t val) {
         sio_write(addr, val);
         return;
     }
-    /* RAM size: 0x1F801060 */
-    if (addr == 0x1F801060u) {
-        ram_size_reg = val;
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Cu) {
+        mem_ctrl2_write_word(addr, val);
         return;
     }
     /* Interrupts: 0x1F801070, 0x1F801074 */
@@ -438,6 +456,11 @@ static uint16_t mmio_read16(uint32_t addr) {
     if (addr >= 0x1F801040u && addr <= 0x1F80105Fu) {
         return (uint16_t)sio_read(addr);
     }
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Eu) {
+        uint32_t val = mem_ctrl2_read_word(addr & ~3u);
+        return (addr & 2) ? (uint16_t)(val >> 16) : (uint16_t)val;
+    }
     /* Interrupts */
     if (addr == 0x1F801070u) { sio_tick(0); return (uint16_t)i_stat; }
     if (addr == 0x1F801074u) return (uint16_t)i_mask;
@@ -469,6 +492,13 @@ static void mmio_write16(uint32_t addr, uint16_t val) {
     /* SIO: 0x1F801040..0x1F80105F */
     if (addr >= 0x1F801040u && addr <= 0x1F80105Fu) {
         sio_write(addr, val);
+        return;
+    }
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Eu) {
+        uint32_t shift = (addr & 2) ? 16u : 0u;
+        uint32_t mask = 0xFFFFu << shift;
+        mem_ctrl2_write_masked(addr & ~3u, (uint32_t)val << shift, mask);
         return;
     }
     /* Interrupts */
@@ -508,6 +538,11 @@ static void mmio_write16(uint32_t addr, uint16_t val) {
 
 static uint8_t mmio_read8(uint32_t addr) {
     SHADOW_NOTE_MMIO();
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Fu) {
+        uint32_t val = mem_ctrl2_read_word(addr & ~3u);
+        return (uint8_t)(val >> (8 * (addr & 3)));
+    }
     /* Interrupts: 0x1F801070..0x1F801077 (I_STAT, I_MASK) */
     if (addr >= 0x1F801070u && addr <= 0x1F801077u) {
         if (addr < 0x1F801074u) sio_tick(0);
@@ -549,6 +584,13 @@ static void mmio_write8(uint32_t addr, uint8_t val) {
     /* SIO: 0x1F801040..0x1F80105F */
     if (addr >= 0x1F801040u && addr <= 0x1F80105Fu) {
         sio_write(addr & ~3u, (uint32_t)val);
+        return;
+    }
+    /* Memory Control 2: RAM_SIZE plus reserved shadow words. */
+    if (addr >= 0x1F801060u && addr <= 0x1F80106Fu) {
+        uint32_t shift = 8 * (addr & 3);
+        uint32_t mask = 0xFFu << shift;
+        mem_ctrl2_write_masked(addr & ~3u, (uint32_t)val << shift, mask);
         return;
     }
     /* DMA: 0x1F801080..0x1F8010FF — byte writes update the corresponding

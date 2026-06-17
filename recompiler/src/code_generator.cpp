@@ -1912,9 +1912,9 @@ std::string CodeGenerator::generate_file(
             // Scan either all CFGs (pass 0) or only rebuilt CFGs (pass 1+)
             auto scan_cfg = [&](const ControlFlowGraph& cfg) {
                 for (const auto& [baddr, block] : cfg.blocks) {
-                    auto check_target = [&](uint32_t target) {
+                    auto check_target = [&](uint32_t target, bool allow_existing_block = false) {
                         if (target == 0) return;
-                        if (cfg.blocks.count(target)) return;
+                        if (!allow_existing_block && cfg.blocks.count(target)) return;
                         if (known_addrs.count(target)) return;
                         if (target < exe_start || target >= exe_end) return;
                         if (target & 3) return;
@@ -1926,6 +1926,14 @@ std::string CodeGenerator::generate_file(
                         check_target(block.exit_instr.address + 8);
                     } else if (block.exit_instr.type == ControlFlowType::Jump) {
                         check_target(block.exit_instr.target);
+                    } else if (block.exit_instr.type == ControlFlowType::JumpLink ||
+                               block.exit_instr.type == ControlFlowType::JumpLinkReg) {
+                        /* The call-contract bail path can surface any
+                         * post-call continuation as cpu->pc, even when the
+                         * continuation is already a normal CFG block inside
+                         * this function. Make those continuations dispatchable
+                         * instead of only handling split/orphan call sites. */
+                        check_target(block.exit_instr.address + 8, true);
                     }
                 }
             };

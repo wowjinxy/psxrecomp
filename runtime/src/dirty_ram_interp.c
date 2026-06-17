@@ -150,6 +150,7 @@ int      g_insn_log_frozen   = 0;
 
 #ifdef PSX_HAS_GAME_DISPATCH
 extern int psx_dispatch_game_compiled(CPUState* cpu, uint32_t addr);
+extern int psx_game_address_in_text(uint32_t addr);
 #endif
 extern void psx_dispatch_call(CPUState* cpu, uint32_t addr, uint32_t return_addr);
 
@@ -403,22 +404,27 @@ static int dirty_ram_word_looks_decodable(uint32_t insn) {
     }
 }
 
+static int dirty_ram_zero_stream(uint32_t phys) {
+    if (phys + 16u > 0x200000u)
+        return 0;
+    return fetch_word(phys) == 0u &&
+           fetch_word(phys + 4u) == 0u &&
+           fetch_word(phys + 8u) == 0u &&
+           fetch_word(phys + 12u) == 0u;
+}
+
 /* A zero word is a valid MIPS NOP, so the decoder above must allow it for
  * delay slots and ordinary code padding. As a dirty-RAM entry, though, a run
- * of zero words in game/overlay RAM is almost always cleared scratch or an
- * overlay that has already been discarded. Interpreting it as executable code
- * turns a bad function pointer into a million-instruction NOP ocean. Keep the
- * BIOS/kernel window permissive because install stubs can be tiny and odd;
- * filter only game/overlay dirty entries. */
+ * of zero words is cleared RAM, not an installed handler. Interpreting it as
+ * executable code turns a bad function pointer into a NOP ocean that falls off
+ * the kernel window and loops through unknown_dispatch. */
 static int dirty_ram_entry_looks_executable(uint32_t phys) {
     uint32_t w0 = fetch_word(phys);
     if (!dirty_ram_word_looks_decodable(w0)) return 0;
 
-    if (phys >= DIRTY_RAM_KERNEL_WINDOW_END && w0 == 0u) {
+    if (w0 == 0u) {
         if (phys + 16u > 0x200000u) return 0;
-        if (fetch_word(phys + 4u) == 0u &&
-            fetch_word(phys + 8u) == 0u &&
-            fetch_word(phys + 12u) == 0u) {
+        if (dirty_ram_zero_stream(phys)) {
             g_dirty_ram_last_unsupported_entry = phys;
             g_dirty_ram_last_unsupported_pc = phys;
             g_dirty_ram_last_unsupported_insn = 0u;
@@ -430,13 +436,48 @@ static int dirty_ram_entry_looks_executable(uint32_t phys) {
     return 1;
 }
 
-static int dirty_ram_zero_stream(uint32_t phys) {
-    if (phys < DIRTY_RAM_KERNEL_WINDOW_END || phys + 16u > 0x200000u)
-        return 0;
-    return fetch_word(phys) == 0u &&
-           fetch_word(phys + 4u) == 0u &&
-           fetch_word(phys + 8u) == 0u &&
-           fetch_word(phys + 12u) == 0u;
+static int dirty_ram_entry_is_resolver_trampoline(uint32_t phys) {
+    uint32_t w0 = fetch_word(phys);
+    uint32_t w1 = fetch_word(phys + 4u);
+    uint32_t w2 = fetch_word(phys + 8u);
+    uint32_t op0 = op_field(w0);
+    uint32_t op1 = op_field(w1);
+
+    if (op0 == 0x02u) return 1; /* j target */
+
+    if (op0 == 0x00u && funct_field(w0) == 0x08u) return 1; /* jr rs */
+
+    if (op0 == 0x09u && rs_field(w0) == 0u) { /* addiu rN, zero, imm / jr rN */
+        uint32_t rt0 = rt_field(w0);
+        if ((w1 & 0xFC1FFFFFu) == 0x00000008u && rs_field(w1) == rt0)
+            return 1;
+    }
+
+    if (op0 == 0x0Fu && (op1 == 0x09u || op1 == 0x0Du)) {
+        uint32_t rt0 = rt_field(w0);
+        if (rs_field(w1) == rt0 && rt_field(w1) == rt0 &&
+            (w2 & 0xFC1FFFFFu) == 0x00000008u && rs_field(w2) == rt0)
+            return 1;
+    }
+
+    return 0;
+}
+
+static void dirty_ram_recursion_guard(void) {
+    extern int g_psx_dispatch_depth;
+    extern void psx_fatal_halt(const char *reason);
+    static int s_rec_guard = 0;
+    static int s_rec_limit = 0;
+    if (s_rec_limit == 0) {
+        const char *e = getenv("PSX_RECURSION_LIMIT");
+        s_rec_limit = (e && *e) ? atoi(e) : 65536;
+        if (s_rec_limit < 32) s_rec_limit = 32;
+    }
+    if (!s_rec_guard && g_psx_dispatch_depth > s_rec_limit) {
+        s_rec_guard = 1;
+        psx_fatal_halt("dirty RAM recursion guard tripped - runaway self-call "
+                       "(see dispatch_depth + dirty_block cycle for the recursing PC)");
+    }
 }
 
 static int dispatch_nonlocal_call(CPUState *cpu, uint32_t target,
@@ -950,34 +991,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
  * event-timeline ring can tag events as INTERP vs STATIC. The EPC-sentinel
  * branch inside can longjmp out (not restoring here); psx_check_interrupts
  * clears the flag at its longjmp landing to cover that case. */
-/* Always-on runaway-recursion guard. The host C stack mirrors the guest call
- * graph (each guest call = a nested psx_dispatch_call -> dirty_ram_dispatch C
- * frame), so an unbounded self-recursion — e.g. a bogus jump-table handler that
- * re-enters its own entity loop (issue #1 seesaw crash: v0=0x8001DFF8) — silently
- * overflows the host stack with no diagnostic (raw STATUS_STACK_OVERFLOW). Trip
- * well below overflow: dump full state (crash report carries dispatch_depth + the
- * dirty_block cycle that NAMES the recursing PC) and halt-and-serve, so the next
- * reproduction (whoever hits it) is captured cleanly + live-inspectable instead of
- * a bare SEH. Normal guest nesting is shallow (<~64); the default 256 sits far
- * above that and below overflow (~500+ frames on a 1 MB stack). Override via
- * PSX_RECURSION_LIMIT. One-shot. NOT a fix — the upstream bogus-pointer divergence
- * still needs the oracle; this converts a hard crash into a catchable, diagnosed
- * bail (Rule 15: make the failure observable). */
 int dirty_ram_dispatch(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
-    extern int g_psx_dispatch_depth;
-    extern void psx_fatal_halt(const char *reason);
-    static int  s_rec_guard = 0;
-    static int  s_rec_limit = 0;
-    if (s_rec_limit == 0) {
-        const char *e = getenv("PSX_RECURSION_LIMIT");
-        s_rec_limit = (e && *e) ? atoi(e) : 256;
-        if (s_rec_limit < 32) s_rec_limit = 32;
-    }
-    if (!s_rec_guard && g_psx_dispatch_depth > s_rec_limit) {
-        s_rec_guard = 1;   /* one-shot: first trip wins the report */
-        psx_fatal_halt("dispatch recursion guard tripped — runaway self-call "
-                       "(see dispatch_depth + dirty_block cycle for the recursing PC)");
-    }
     int prev = g_dirty_interp_active;
     g_dirty_interp_active = 1;
     int r = dirty_ram_dispatch_inner(cpu, addr, stop_addr);
@@ -1041,8 +1055,24 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
 #define OV_FPLOG_RET1() do { if (_ovfp) overlay_fp_log(addr, _in_regs, cpu, 0); return 1; } while (0)
 
     if (!dirty_ram_is_dirty(phys)) return 0;
-    if (!overlay_cache_window_contains(phys)) return 0;
+    int in_dirty_exec_window = overlay_cache_window_contains(phys);
+#ifdef PSX_HAS_GAME_DISPATCH
+    /* Main-EXE text normally runs as compiled C. If static discovery missed a
+     * callable entry, interpret that one dirty, loaded RAM block as a cold
+     * fallback instead of silently no-oping the call. Local chaining still uses
+     * overlay_cache_window_contains(), so this does not turn the whole main EXE
+     * into an interpreter path. */
+    if (!in_dirty_exec_window && psx_game_address_in_text(addr)) {
+        in_dirty_exec_window = 1;
+    }
+#endif
+    if (!in_dirty_exec_window) return 0;
+    if (phys < DIRTY_RAM_KERNEL_WINDOW_END &&
+        dirty_ram_entry_is_resolver_trampoline(phys)) {
+        return 0;
+    }
     if (!dirty_ram_entry_looks_executable(phys)) return 0;
+    dirty_ram_recursion_guard();
 
     /* Interp-pressure signal for variant-capture automation (step 2.8):
      * counts dispatches the interpreter actually handles inside a capture
