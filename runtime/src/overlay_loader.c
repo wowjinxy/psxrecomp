@@ -364,18 +364,27 @@ static void register_sljit_candidate(uint32_t phys, OverlayFn fn,
     loader_log("sljit shard registered 0x%08X [%u bytes]", c->addr, len);
 }
 
-/* JIT-on-miss memo: phys entries already attempted (compiled or declined), so a
- * declined fragment isn't re-attempted every dispatch. */
+/* JIT-on-miss memo: phys+page-generation entries already attempted (compiled or
+ * declined), so a declined fragment isn't re-attempted every dispatch, while a
+ * reused overlay address with new live bytes can still be tried. */
 #define MAX_SLJIT_TRIED 512
-static uint32_t s_sljit_tried[MAX_SLJIT_TRIED];
-static int      s_sljit_tried_n = 0;
-static int sljit_already_tried(uint32_t phys) {
+typedef struct { uint32_t phys; uint32_t gen; } SljitTried;
+static SljitTried s_sljit_tried[MAX_SLJIT_TRIED];
+static int        s_sljit_tried_n = 0;
+static uint32_t sljit_try_gen(uint32_t phys) {
+    return overlay_watch_pagegen_sum(phys & ~4095u, 4096u);
+}
+static int sljit_already_tried(uint32_t phys, uint32_t gen) {
     for (int i = 0; i < s_sljit_tried_n; i++)
-        if (s_sljit_tried[i] == phys) return 1;
+        if (s_sljit_tried[i].phys == phys && s_sljit_tried[i].gen == gen) return 1;
     return 0;
 }
-static void sljit_mark_tried(uint32_t phys) {
-    if (s_sljit_tried_n < MAX_SLJIT_TRIED) s_sljit_tried[s_sljit_tried_n++] = phys;
+static void sljit_mark_tried(uint32_t phys, uint32_t gen) {
+    if (s_sljit_tried_n < MAX_SLJIT_TRIED) {
+        s_sljit_tried[s_sljit_tried_n].phys = phys;
+        s_sljit_tried[s_sljit_tried_n].gen  = gen;
+        s_sljit_tried_n++;
+    }
 }
 
 /* Persist a freshly-JIT'd shard's serialized LIR to the on-disk cache (defined
@@ -394,10 +403,11 @@ static void try_sljit_region(uint32_t addr) {
      * JIT-on-miss gap-fill must go through sljit even when gcc is "active". */
     const CodeProvider *cp = code_provider_sljit();
     if (!cp || !cp->compile_fragment) return;
-    if (sljit_already_tried(phys)) return;
+    uint32_t gen = sljit_try_gen(phys);
+    if (sljit_already_tried(phys, gen)) return;
     extern int dirty_ram_is_dirty(uint32_t phys);
     if (!dirty_ram_is_dirty(phys)) return;   /* only JIT real runtime code */
-    sljit_mark_tried(phys);
+    sljit_mark_tried(phys, gen);
     uint8_t *ram = memory_get_ram_ptr();
     if (!ram) return;
     CompiledFragment frag = {0};
@@ -991,6 +1001,7 @@ static void try_load_region(uint32_t phys) {
 int overlay_loader_dispatch(CPUState *cpu, uint32_t addr) {
     uint32_t phys = addr & 0x1FFFFFFFu;
     int head = idx_head(phys);
+    int tried_live_sljit = 0;
     if (head < 0 && s_active && overlay_cache_window_contains(phys)) {
         try_load_region(phys);
         head = idx_head(phys);
@@ -1006,11 +1017,13 @@ int overlay_loader_dispatch(CPUState *cpu, uint32_t addr) {
              * gap (priority gcc > sljit > interp). Fires whenever sljit is
              * AVAILABLE, not only when it is the exclusive backend, so sljit and
              * gcc run complementarily. */
+            tried_live_sljit = 1;
             try_sljit_region(addr);   /* virtual entry (carries KSEG bits) */
             head = idx_head(phys);
         }
     }
 
+scan_candidates:
     for (int i = head; i >= 0; i = s_cand[i].next) {
         Candidate *c = &s_cand[i];
         if (c->state == ENTRY_BLACKLIST) continue;
@@ -1051,7 +1064,7 @@ int overlay_loader_dispatch(CPUState *cpu, uint32_t addr) {
              * executing I/O — the save-load wedge). gcc candidates (dll >= 0) are
              * the trusted tier (validated at dev time) and run native directly;
              * they are diffed only in explicit dev diff mode. */
-            int want_diff = s_diff_mode || (s_sljit_live && c->dll < 0);
+            int want_diff = s_diff_mode; /* live SLJIT skips shadow diff unless explicitly requested */
             if (want_diff && !s_in_shadow && c->diff_passes < OVERLAY_DIFF_BUDGET) {
                 run_shadow_diff(cpu, c, addr);
                 return 1;
@@ -1099,6 +1112,19 @@ int overlay_loader_dispatch(CPUState *cpu, uint32_t addr) {
             }
             s_stale_blocked++;
         }
+    }
+
+    /* Reused overlay addresses can have stale candidates in the chain, which
+     * means head >= 0 but none match the current live bytes. Let SLJIT fill that
+     * exact-generation gap too; the rescan below still requires a byte-exact
+     * candidate hash match before native or diff execution. */
+    if (!tried_live_sljit && s_active && overlay_cache_window_contains(phys) &&
+        (s_diff_mode || s_sljit_live) && !s_in_shadow &&
+        code_provider_sljit() != NULL) {
+        tried_live_sljit = 1;
+        try_sljit_region(addr);
+        head = idx_head(phys);
+        if (head >= 0) goto scan_candidates;
     }
 
     s_disp_interp++;

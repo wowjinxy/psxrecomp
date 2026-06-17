@@ -334,6 +334,14 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         "  \"bail_resolved\":%llu,\n"
         "  \"bail_flattened\":%llu,\n"
         "  \"bail_anomaly\":%llu,\n"
+        "  \"bail_last_site_ra\":\"0x%08X\",\n"
+        "  \"bail_last_site_sp\":\"0x%08X\",\n"
+        "  \"bail_last_actual_ra\":\"0x%08X\",\n"
+        "  \"bail_last_actual_sp\":\"0x%08X\",\n"
+        "  \"bail_last_pc_before\":\"0x%08X\",\n"
+        "  \"bail_last_pc_after\":\"0x%08X\",\n"
+        "  \"bail_last_resolve_site_ra\":\"0x%08X\",\n"
+        "  \"bail_last_resolve_site_sp\":\"0x%08X\",\n"
         "  \"present_slow_count\":%u,\n"
         "  \"present_vsync_disabled\":%d,\n"
         "  \"wedge_kind\":%u,\n"
@@ -360,6 +368,14 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         (unsigned long long)g_psx_bail_resolved,
         (unsigned long long)g_psx_bail_flattened,
         (unsigned long long)g_psx_bail_anomaly,
+        g_psx_bail_last_site_ra,
+        g_psx_bail_last_site_sp,
+        g_psx_bail_last_actual_ra,
+        g_psx_bail_last_actual_sp,
+        g_psx_bail_last_pc_before,
+        g_psx_bail_last_pc_after,
+        g_psx_bail_last_resolve_site_ra,
+        g_psx_bail_last_resolve_site_sp,
         g_present_slow_count,
         g_present_vsync_disabled,
         wedge_kind,
@@ -633,6 +649,14 @@ static void heartbeat_write(void) {
         "  \"bail_resolved\":%llu,\n"
         "  \"bail_flattened\":%llu,\n"
         "  \"bail_anomaly\":%llu,\n"
+        "  \"bail_last_site_ra\":\"0x%08X\",\n"
+        "  \"bail_last_site_sp\":\"0x%08X\",\n"
+        "  \"bail_last_actual_ra\":\"0x%08X\",\n"
+        "  \"bail_last_actual_sp\":\"0x%08X\",\n"
+        "  \"bail_last_pc_before\":\"0x%08X\",\n"
+        "  \"bail_last_pc_after\":\"0x%08X\",\n"
+        "  \"bail_last_resolve_site_ra\":\"0x%08X\",\n"
+        "  \"bail_last_resolve_site_sp\":\"0x%08X\",\n"
         "  \"fatal\":%s%s%s\n"
         "}\n",
         s_backend,
@@ -663,6 +687,14 @@ static void heartbeat_write(void) {
         (unsigned long long)g_psx_bail_resolved,
         (unsigned long long)g_psx_bail_flattened,
         (unsigned long long)g_psx_bail_anomaly,
+        g_psx_bail_last_site_ra,
+        g_psx_bail_last_site_sp,
+        g_psx_bail_last_actual_ra,
+        g_psx_bail_last_actual_sp,
+        g_psx_bail_last_pc_before,
+        g_psx_bail_last_pc_after,
+        g_psx_bail_last_resolve_site_ra,
+        g_psx_bail_last_resolve_site_sp,
         g_psx_fatal_reason ? "\"" : "",
         g_psx_fatal_reason ? g_psx_fatal_reason : "null",
         g_psx_fatal_reason ? "\"" : "");

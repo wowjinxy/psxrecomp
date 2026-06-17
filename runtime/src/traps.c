@@ -23,6 +23,14 @@ uint64_t g_psx_bail_first     = 0;
 uint64_t g_psx_bail_resolved  = 0;
 uint64_t g_psx_bail_flattened = 0;
 uint64_t g_psx_bail_anomaly   = 0;
+uint32_t g_psx_bail_last_site_ra = 0;
+uint32_t g_psx_bail_last_site_sp = 0;
+uint32_t g_psx_bail_last_actual_ra = 0;
+uint32_t g_psx_bail_last_actual_sp = 0;
+uint32_t g_psx_bail_last_pc_before = 0;
+uint32_t g_psx_bail_last_pc_after = 0;
+uint32_t g_psx_bail_last_resolve_site_ra = 0;
+uint32_t g_psx_bail_last_resolve_site_sp = 0;
 
 static void trap_crash(const char* msg) {
     FILE* cf = fopen("psx_crash.txt", "w");

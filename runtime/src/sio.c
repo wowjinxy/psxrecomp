@@ -615,6 +615,15 @@ static void pad_process_byte(uint8_t tx_byte) {
             pad_state = PAD_SEND_RESPONSE;
             sio_rx_data = pad_response[0];
             sio_stat |= SIO_STAT_ACK;
+        } else if (!pad_analog[selected_slot]) {
+            /* A digital PS1 pad only acknowledges the normal 0x42 poll.
+             * DualShock config commands such as 0x43 must look unsupported so
+             * BIOS/game detection falls back to digital polling. */
+            pad_state = PAD_IDLE;
+            pad_response_len = 0;
+            pad_response_idx = 0;
+            pad_current_cmd = 0;
+            sio_rx_data = 0xFF;
         } else if (tx_byte == 0x43) {
             static const uint8_t resp_43[8] = {
                 0xF3, 0x5A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00

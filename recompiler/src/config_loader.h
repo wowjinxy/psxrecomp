@@ -144,6 +144,10 @@ struct RuntimeConfig {
     // user toggling DualShock in the launcher. Per-install settings.toml
     // [controller] p1_analog/p2_analog still override. Default off (digital 0x41).
     // `default_analog = true` sets both ports; `p1_analog`/`p2_analog` set one.
+    bool                  has_default_p1_device = false;
+    bool                  has_default_p2_device = false;
+    std::string           default_p1_device = "keyboard";
+    std::string           default_p2_device = "none";
     bool                  has_default_analog = false;
     bool                  default_p1_analog  = false;
     bool                  default_p2_analog  = false;
@@ -217,6 +221,7 @@ struct GameConfig {
     uint32_t              entry_pc;
     uint32_t              text_size;
     uint32_t              stack_base;    // initial $sp
+    uint32_t              stack_word;    // optional PSYQ startup stack word to patch
     // disc paths (Phase D will properly support multi-disc; for now we
     // accept either a single `disc = "..."` or `discs = [...]` and store
     // the union here).

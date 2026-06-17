@@ -123,6 +123,14 @@ extern uint64_t g_psx_bail_first;      /* contract violations detected      */
 extern uint64_t g_psx_bail_resolved;   /* unwinds resolved at a call site   */
 extern uint64_t g_psx_bail_flattened;  /* unwinds flattened at outermost    */
 extern uint64_t g_psx_bail_anomaly;    /* bail flag seen where impossible   */
+extern uint32_t g_psx_bail_last_site_ra;
+extern uint32_t g_psx_bail_last_site_sp;
+extern uint32_t g_psx_bail_last_actual_ra;
+extern uint32_t g_psx_bail_last_actual_sp;
+extern uint32_t g_psx_bail_last_pc_before;
+extern uint32_t g_psx_bail_last_pc_after;
+extern uint32_t g_psx_bail_last_resolve_site_ra;
+extern uint32_t g_psx_bail_last_resolve_site_sp;
 #endif
 
 /* Validate a direct call site after the callee's C return.
@@ -138,20 +146,42 @@ static inline int psx_call_contract(CPUState* cpu, uint32_t site_ra,
             cpu->gpr[29] == site_sp) {
             g_psx_call_bail = 0;
             g_psx_bail_resolved++;
+#ifndef PSX_OVERLAY_DLL_BUILD
+            g_psx_bail_last_resolve_site_ra = site_ra;
+            g_psx_bail_last_resolve_site_sp = site_sp;
+#endif
             cpu->pc = 0;
             return 0;
         }
         return 1;
     }
-    if (cpu->gpr[29] != site_sp ||
+    if (cpu->pc != 0 &&
+        ((cpu->pc ^ site_ra) & 0x1FFFFFFFu) == 0 &&
+        cpu->gpr[29] == site_sp) {
+        cpu->pc = 0;
+        return 0;
+    }
+    if (cpu->pc != 0 ||
+        cpu->gpr[29] != site_sp ||
         ((cpu->gpr[31] ^ site_ra) & 0x1FFFFFFFu) != 0) {
         /* First detection: the callee C-returned but the guest did not
          * return here.  $ra holds the wild jr's true destination (the
          * longjmp-return emission sets cpu->pc = $ra before returning,
          * which is the same value). */
+#ifndef PSX_OVERLAY_DLL_BUILD
+        g_psx_bail_last_site_ra = site_ra;
+        g_psx_bail_last_site_sp = site_sp;
+        g_psx_bail_last_actual_ra = cpu->gpr[31];
+        g_psx_bail_last_actual_sp = cpu->gpr[29];
+        g_psx_bail_last_pc_before = cpu->pc;
+#endif
         g_psx_call_bail = 1;
         g_psx_bail_first++;
-        cpu->pc = cpu->gpr[31];
+        if (cpu->pc == 0)
+            cpu->pc = cpu->gpr[31];
+#ifndef PSX_OVERLAY_DLL_BUILD
+        g_psx_bail_last_pc_after = cpu->pc;
+#endif
         return 1;
     }
     return 0;

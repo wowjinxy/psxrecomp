@@ -1,0 +1,38 @@
+[game]
+name = "Silhouette Mirage"
+id = "SLUS-00728"
+exe = "../extracted/Silhouette Mirage/SLUS_007.28"
+load_address = "0x80010100"
+entry_pc = "0x80010CD8"
+text_size = "0x0000C000"
+stack_base = "0x801FFFF0"
+disc = "../extracted/Silhouette Mirage/Silhouette Mirage.cue"
+disc_crc = "0xBEDCDBFA"
+disc_sha1 = "9e37436575aac7454f6e113aa22fdbf2ab235773"
+
+[recompiler]
+seeds = "games/silhouette-mirage/seeds.txt"
+out_dir = "generated"
+strict = true
+out_stem = "SLUS_007.28"
+
+[runtime]
+debug_port = 4373
+window_title = "Silhouette Mirage"
+memcard_dir = "saves/silhouette-mirage"
+disc_speed = "1x"
+overlay_cache = true
+overlay_backend = "sljit"
+
+[video]
+renderer = "software"
+supersampling = 1
+antialiasing = true
+texture_filtering = "nearest"
+crt_filter = "raw"
+aspect_ratio = "4:3"
+
+[controller]
+p1_device = "auto"
+p1_analog = false
+p2_analog = false

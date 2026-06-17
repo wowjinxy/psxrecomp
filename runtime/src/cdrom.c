@@ -52,15 +52,17 @@ static uint8_t response_fifo[RESPONSE_FIFO_SIZE];
 static int response_read;
 static int response_count;
 
-/* Data buffer. Whole-sector mode transfers 0x924 bytes starting after
- * the 12 sync bytes: header, subheader, and sector payload. */
+/* Data buffer. Whole-sector mode can transfer up to 0x924 bytes starting
+ * after the 12 sync bytes. Mode 2 Form 1 data sectors stop after the
+ * header, subheader, and 2048-byte payload. */
 #define SECTOR_SIZE 2048
 #define RAW_SECTOR_SIZE 2352
 #define RAW_USER_DATA_OFFSET 24
 #define WHOLE_SECTOR_OFFSET 12
 #define WHOLE_SECTOR_SIZE (RAW_SECTOR_SIZE - WHOLE_SECTOR_OFFSET)
 #define FALLBACK_SECTOR_HEADER_SIZE 12
-#define FALLBACK_WHOLE_SECTOR_SIZE (FALLBACK_SECTOR_HEADER_SIZE + SECTOR_SIZE)
+#define MODE2_FORM1_WHOLE_SECTOR_SIZE (FALLBACK_SECTOR_HEADER_SIZE + SECTOR_SIZE)
+#define FALLBACK_WHOLE_SECTOR_SIZE MODE2_FORM1_WHOLE_SECTOR_SIZE
 #define SECTOR_BUFFER_SIZE WHOLE_SECTOR_SIZE
 static uint8_t sector_buffer[SECTOR_BUFFER_SIZE];
 static int sector_read_pos;
@@ -101,6 +103,8 @@ static uint8_t cd_muted;
 #define XA_MAX_44100_FRAMES 9408
 
 #define XA_SUBMODE_AUDIO 0x04
+#define XA_SUBMODE_DATA 0x08
+#define XA_SUBMODE_FORM2 0x20
 #define XA_SUBMODE_REALTIME 0x40
 #define CDROM_SECTOR_MODE2 0x02
 
@@ -315,6 +319,16 @@ static int xa_is_audio_realtime(const CDROMSectorDelivery *d) {
            d->raw_mode == CDROM_SECTOR_MODE2 &&
            ((d->xa_submode & (XA_SUBMODE_AUDIO | XA_SUBMODE_REALTIME)) ==
             (XA_SUBMODE_AUDIO | XA_SUBMODE_REALTIME));
+}
+
+static int raw_whole_sector_size(const CDROMSectorDelivery *d) {
+    if (d &&
+        d->raw_mode == CDROM_SECTOR_MODE2 &&
+        (d->xa_submode & XA_SUBMODE_DATA) &&
+        !(d->xa_submode & XA_SUBMODE_FORM2)) {
+        return MODE2_FORM1_WHOLE_SECTOR_SIZE;
+    }
+    return WHOLE_SECTOR_SIZE;
 }
 
 static CDROMSectorDelivery classify_raw_sector(const uint8_t *raw_data, int have_raw) {
@@ -641,8 +655,8 @@ static int read_sector_at(int min, int sec, int sect) {
     memset(sector_buffer, 0, sizeof(sector_buffer));
     if (delivery.data_delivered && (mode_reg & 0x20)) {
         if (have_raw) {
-            memcpy(sector_buffer, raw_data + WHOLE_SECTOR_OFFSET, WHOLE_SECTOR_SIZE);
-            sector_size = WHOLE_SECTOR_SIZE;
+            sector_size = raw_whole_sector_size(&delivery);
+            memcpy(sector_buffer, raw_data + WHOLE_SECTOR_OFFSET, (size_t)sector_size);
             history_bytes = sector_buffer;
             history_size = sector_size;
         } else {

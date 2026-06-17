@@ -6615,6 +6615,19 @@ static void handle_freeze_check(int id, const char *json)
                     "\"dirty_ram_insns\":%llu,"
                     "\"dirty_ram_aborts\":%llu,"
                     "\"dirty_ram_guard_yields\":%llu,"
+                    "\"call_bail\":%d,"
+                    "\"bail_first\":%llu,"
+                    "\"bail_resolved\":%llu,"
+                    "\"bail_flattened\":%llu,"
+                    "\"bail_anomaly\":%llu,"
+                    "\"bail_last_site_ra\":\"0x%08X\","
+                    "\"bail_last_site_sp\":\"0x%08X\","
+                    "\"bail_last_actual_ra\":\"0x%08X\","
+                    "\"bail_last_actual_sp\":\"0x%08X\","
+                    "\"bail_last_pc_before\":\"0x%08X\","
+                    "\"bail_last_pc_after\":\"0x%08X\","
+                    "\"bail_last_resolve_site_ra\":\"0x%08X\","
+                    "\"bail_last_resolve_site_sp\":\"0x%08X\","
                     "\"fn_entry_total\":%llu,"
                     "\"sio_irq_total\":%u,"
                     "\"sio_byte_seq\":%u,"
@@ -6652,6 +6665,19 @@ static void handle_freeze_check(int id, const char *json)
                     (unsigned long long)g_dirty_ram_insns_run,
                     (unsigned long long)g_dirty_ram_aborts,
                     (unsigned long long)g_dirty_ram_guard_yields,
+                    g_psx_call_bail,
+                    (unsigned long long)g_psx_bail_first,
+                    (unsigned long long)g_psx_bail_resolved,
+                    (unsigned long long)g_psx_bail_flattened,
+                    (unsigned long long)g_psx_bail_anomaly,
+                    g_psx_bail_last_site_ra,
+                    g_psx_bail_last_site_sp,
+                    g_psx_bail_last_actual_ra,
+                    g_psx_bail_last_actual_sp,
+                    g_psx_bail_last_pc_before,
+                    g_psx_bail_last_pc_after,
+                    g_psx_bail_last_resolve_site_ra,
+                    g_psx_bail_last_resolve_site_sp,
                     (unsigned long long)s_fn_entry_seq,
                     irq_total,
                     sio_get_seq(),

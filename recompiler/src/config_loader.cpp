@@ -176,6 +176,20 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
     // Optional [controller] block — game-declared input defaults.
     if (cfg.contains("controller")) {
         const toml::value& ct = toml::find(cfg, "controller");
+        if (ct.contains("p1_device")) {
+            const auto v = toml::find<std::string>(ct, "p1_device");
+            if (!v.empty()) {
+                rt.default_p1_device = v;
+                rt.has_default_p1_device = true;
+            }
+        }
+        if (ct.contains("p2_device")) {
+            const auto v = toml::find<std::string>(ct, "p2_device");
+            if (!v.empty()) {
+                rt.default_p2_device = v;
+                rt.has_default_p2_device = true;
+            }
+        }
         if (ct.contains("default_analog")) {
             const bool a = toml::find<bool>(ct, "default_analog");
             rt.default_p1_analog = a;
@@ -440,6 +454,10 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         game.contains("stack_base")
             ? parse_hex(toml::find<std::string>(game, "stack_base"), "game.stack_base")
             : 0x801FFFF0u;
+    const uint32_t stack_word =
+        game.contains("stack_word")
+            ? parse_hex(toml::find<std::string>(game, "stack_word"), "game.stack_word")
+            : 0u;
 
     // Disc paths: accept either single `disc` or array `discs`.
     std::vector<fs::path> discs;
@@ -576,6 +594,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*entry_pc*/         entry_pc,
         /*text_size*/        text_size,
         /*stack_base*/       stack_base,
+        /*stack_word*/       stack_word,
         /*discs*/            discs,
         /*has_disc_crc*/     has_disc_crc,
         /*disc_crc*/         disc_crc,

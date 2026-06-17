@@ -263,7 +263,7 @@ void overlay_capture_write_json(void)
      * for the window model). Main-EXE text between them is never captured. */
     write_json_window(f, 0u,
                       DIRTY_RAM_KERNEL_WINDOW_END / page_sz, &first_region);
-    write_json_window(f, OVERLAY_REGION_FLOOR / page_sz, bw * 32u,
+    write_json_window(f, dirty_ram_overlay_region_floor() / page_sz, bw * 32u,
                       &first_region);
 
     fprintf(f, "\n]\n");

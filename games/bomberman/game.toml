@@ -1,0 +1,37 @@
+[game]
+name = "Bomberman Fantasy Race"
+id = "SLUS-00823"
+exe = "../extracted/Bomberman Fantasy Race (USA)/SLUS_008.23"
+load_address = "0x8003004C"
+entry_pc = "0x800C0AE4"
+text_size = "0x000D6800"
+stack_base = "0x801FFF00"
+stack_word = "0x800ED77C"
+disc = "../Bomberman Fantasy Race (USA).cue"
+
+[recompiler]
+seeds = "games/bomberman/seeds.txt"
+out_dir = "generated"
+strict = true
+out_stem = "SLUS_008.23"
+
+[runtime]
+debug_port = 4372
+window_title = "Bomberman Fantasy Race"
+memcard_dir = "saves/bomberman"
+disc_speed = "1x"
+overlay_cache = true
+overlay_backend = "sljit"
+
+[video]
+renderer = "software"
+supersampling = 1
+antialiasing = true
+texture_filtering = "nearest"
+crt_filter = "raw"
+aspect_ratio = "4:3"
+
+[controller]
+p1_device = "auto"
+p1_analog = false
+p2_analog = false

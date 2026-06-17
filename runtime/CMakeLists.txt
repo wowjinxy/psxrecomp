@@ -31,6 +31,15 @@ psxrecomp_add_runtime_target(psx-runtime
     DEFAULT_BIOS_PATH "${PSXRECOMP_ROOT}/bios/SCPH1001.BIN"
 )
 
+psxrecomp_add_runtime_target(psx-bomberman
+    DEBUG_PORT 4372
+    WINDOW_TITLE "Bomberman Fantasy Race"
+    DEFAULT_BIOS_PATH "${PSXRECOMP_ROOT}/bios/SCPH1001.BIN"
+    DEFAULT_GAME_CONFIG_PATH "${PSXRECOMP_ROOT}/games/bomberman/game.toml"
+    GAME_GENERATED_FULL_C "${PSXRECOMP_ROOT}/generated/SLUS_008.23_full.c"
+    GAME_GENERATED_DISPATCH_C "${PSXRECOMP_ROOT}/generated/SLUS_008.23_dispatch.c"
+)
+
 if(NOT MSVC)
     psxrecomp_add_runtime_target(psx-oracle
         ORACLE

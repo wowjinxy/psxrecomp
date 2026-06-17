@@ -523,7 +523,8 @@ bool FullFunctionEmitter::emit_function(
                     uint32_t return_addr = relocate_ra(addr + 8);
                     out += "    { uint32_t _csp = cpu->gpr[29];\n";
                     out += fmt::format("    cpu->gpr[31] = 0x{:08X}u;\n", return_addr);
-                    out += fmt::format("    psx_dispatch(cpu, 0x{:08X}u);\n", target);
+                    out += fmt::format("    psx_dispatch_call(cpu, 0x{:08X}u, 0x{:08X}u);\n",
+                                       target, return_addr);
                     out += fmt::format("    if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n",
                                        return_addr);
                     out += fmt::format("    cpu->pc = 0x{:08X}u; return;\n", return_addr);
@@ -550,8 +551,8 @@ bool FullFunctionEmitter::emit_function(
                         out += fmt::format("    cpu->gpr[{}] = 0x{:08X}u;\n",
                                            static_cast<int>(rd), return_addr);
                     }
-                    out += fmt::format("    psx_dispatch(cpu, cpu->gpr[{}]);\n",
-                                       static_cast<int>(rs));
+                    out += fmt::format("    psx_dispatch_call(cpu, cpu->gpr[{}], 0x{:08X}u);\n",
+                                       static_cast<int>(rs), return_addr);
                     if (rd == 31) {
                         out += fmt::format("    if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n",
                                            return_addr);
@@ -670,7 +671,8 @@ bool FullFunctionEmitter::emit_function(
                     out += fmt::format("    debug_server_log_probe(0x{:08X}u, cpu);\n",
                                        pb.terminator_addr);
                 }
-                out += fmt::format("    psx_dispatch(cpu, 0x{:08X}u);\n", target);
+                out += fmt::format("    psx_dispatch_call(cpu, 0x{:08X}u, 0x{:08X}u);\n",
+                                   target, return_addr);
                 if (target == 0x00006380u) {
                     out += fmt::format("    debug_server_log_probe(0x{:08X}u, cpu);\n",
                                        pb.terminator_addr + 1);
@@ -702,8 +704,8 @@ bool FullFunctionEmitter::emit_function(
                     out += fmt::format("    cpu->gpr[{}] = 0x{:08X}u;\n",
                                        static_cast<int>(rd), return_addr);
                 }
-                out += fmt::format("    psx_dispatch(cpu, cpu->gpr[{}]);\n",
-                                   static_cast<int>(rs));
+                out += fmt::format("    psx_dispatch_call(cpu, cpu->gpr[{}], 0x{:08X}u);\n",
+                                   static_cast<int>(rs), return_addr);
                 if (rd == 31) {
                     out += fmt::format("    if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n",
                                        return_addr);
@@ -1099,13 +1101,23 @@ void FullFunctionEmitter::emit_dispatch(
     out += "extern void fntrace_record(CPUState* cpu, uint32_t target);\n";
     out += "extern uint64_t g_dispatch_static_hits;\n";
     out += "\n";
-    out += "int g_psx_dispatch_depth = 0;\n\n";
+    out += "int g_psx_dispatch_depth = 0;\n";
+    out += "int g_psx_dispatch_epoch = 0;\n\n";
+    out += "static void psx_dispatch_leave(int epoch) {\n";
+    out += "    if (epoch != g_psx_dispatch_epoch) return;\n";
+    out += "    if (g_psx_dispatch_depth > 0) {\n";
+    out += "        --g_psx_dispatch_depth;\n";
+    out += "    } else {\n";
+    out += "        g_psx_dispatch_depth = 0;\n";
+    out += "    }\n";
+    out += "}\n\n";
     out += "static void psx_dispatch_impl(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {\n";
     out += "    /* Tail-call trampoline: functions signal tail calls by setting\n";
     out += "     * cpu->pc to the target and returning. We loop here to re-dispatch\n";
     out += "     * without growing the native stack. Interrupts are only checked when\n";
     out += "     * the outermost dispatch returns, so a nested callee cannot interrupt\n";
     out += "     * before its generated caller runs the post-call continuation. */\n";
+    out += "    int depth_epoch = g_psx_dispatch_epoch;\n";
     out += "    int outermost = (g_psx_dispatch_depth++ == 0);\n";
     out += "    /* Call contract (Bug D family): the guest $sp at the call.  A C\n";
     out += "     * continuation behind this dispatch may only run if the guest\n";
@@ -1168,15 +1180,17 @@ void FullFunctionEmitter::emit_dispatch(
     out += "                cpu->gpr[29] == sp_at_call) {\n";
     out += "                g_psx_call_bail = 0;\n";
     out += "                g_psx_bail_resolved++;\n";
+    out += "                g_psx_bail_last_resolve_site_ra = stop_addr;\n";
+    out += "                g_psx_bail_last_resolve_site_sp = sp_at_call;\n";
     out += "                cpu->pc = 0;\n";
-    out += "                --g_psx_dispatch_depth;\n";
+    out += "                psx_dispatch_leave(depth_epoch);\n";
     out += "                if (outermost) {\n";
     out += "                    psx_check_interrupts(cpu);\n";
     out += "                }\n";
     out += "                return;\n";
     out += "            }\n";
     out += "            if (!outermost) {\n";
-    out += "                --g_psx_dispatch_depth;\n";
+    out += "                psx_dispatch_leave(depth_epoch);\n";
     out += "                return;  /* propagate to the enclosing call site */\n";
     out += "            }\n";
     out += "            /* Outermost: flatten — host stack above is clean, keep\n";
@@ -1196,23 +1210,29 @@ void FullFunctionEmitter::emit_dispatch(
     out += "                 * suspended C continuation. */\n";
     out += "                g_psx_call_bail = 1;\n";
     out += "                g_psx_bail_first++;\n";
+    out += "                g_psx_bail_last_site_ra = stop_addr;\n";
+    out += "                g_psx_bail_last_site_sp = sp_at_call;\n";
+    out += "                g_psx_bail_last_actual_ra = cpu->gpr[31];\n";
+    out += "                g_psx_bail_last_actual_sp = cpu->gpr[29];\n";
+    out += "                g_psx_bail_last_pc_before = cpu->pc;\n";
     out += "                cpu->pc = cpu->gpr[31];\n";
+    out += "                g_psx_bail_last_pc_after = cpu->pc;\n";
     out += "                if (outermost) {\n";
     out += "                    g_psx_call_bail = 0;\n";
     out += "                    g_psx_bail_flattened++;\n";
     out += "                    addr = cpu->pc;\n";
     out += "                    continue;\n";
     out += "                }\n";
-    out += "                --g_psx_dispatch_depth;\n";
+    out += "                psx_dispatch_leave(depth_epoch);\n";
     out += "                return;\n";
     out += "            }\n";
-    out += "            --g_psx_dispatch_depth;\n";
+    out += "            psx_dispatch_leave(depth_epoch);\n";
     out += "            if (outermost) {\n";
     out += "                psx_check_interrupts(cpu);\n";
     out += "            }\n";
     out += "            return;\n";
     out += "        }\n";
-    out += "        if (stop_addr != 0 && cpu->pc == stop_addr) {\n";
+    out += "        if (stop_addr != 0 && ((cpu->pc ^ stop_addr) & 0x1FFFFFFFu) == 0) {\n";
     out += "            if (cpu->gpr[29] != sp_at_call) {\n";
     out += "                /* Same address, different frame (recursion or a wild\n";
     out += "                 * arrival): not this call's return — keep executing\n";
@@ -1221,7 +1241,7 @@ void FullFunctionEmitter::emit_dispatch(
     out += "                continue;\n";
     out += "            }\n";
     out += "            cpu->pc = 0;\n";
-    out += "            --g_psx_dispatch_depth;\n";
+    out += "            psx_dispatch_leave(depth_epoch);\n";
     out += "            if (outermost) {\n";
     out += "                psx_check_interrupts(cpu);\n";
     out += "            }\n";
@@ -1293,8 +1313,9 @@ EmitStats FullFunctionEmitter::emit(
     full_c += " */\n\n";
     full_c += "#include \"cpu_state.h\"\n\n";
 
-    // Forward declare psx_dispatch, psx_unknown_dispatch, and interrupt check.
+    // Forward declare psx_dispatch, psx_dispatch_call, psx_unknown_dispatch, and interrupt check.
     full_c += "extern void psx_dispatch(CPUState* cpu, uint32_t addr);\n";
+    full_c += "extern void psx_dispatch_call(CPUState* cpu, uint32_t addr, uint32_t return_addr);\n";
     full_c += "extern void psx_unknown_dispatch(CPUState* cpu, uint32_t addr, uint32_t phys);\n";
     full_c += "extern void psx_check_interrupts(CPUState* cpu);\n";
     full_c += "extern void psx_restore_state_escape(void);\n";

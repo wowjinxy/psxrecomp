@@ -813,7 +813,8 @@ std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr) 
             case 0x0D:                                          // break
                 {
                     uint32_t break_code = (instr >> 6) & 0xFFFFF;
-                    code = fmt::format("/* break({}) — trap, no-op in recompiler */", break_code);
+                    code = fmt::format("psx_break(cpu, 0x{:05X}u, 0x{:08X}u); return;  /* break */",
+                                       break_code, addr);
                 }
                 break;
             case 0x10: code = translate_mfhi(instr); break;    // mfhi
@@ -1321,9 +1322,7 @@ std::string CodeGenerator::translate_basic_block(
                         ss << config_.indent << fmt::format("if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n", addr + 8);
                     } else {
                         ss << config_.indent << fmt::format("call_by_address(cpu, 0x{:08X}u);  /* external jal */\n", target);
-                        /* psx_dispatch_call validated the (ra, sp) contract;
-                         * only propagate an active bail unwind here. */
-                        ss << config_.indent << "if (g_psx_call_bail) return; (void)_csp; }\n";
+                        ss << config_.indent << fmt::format("if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n", addr + 8);
                     }
                     if (!block.successors.empty()) {
                         ss << config_.indent
@@ -1345,6 +1344,8 @@ std::string CodeGenerator::translate_basic_block(
                     uint32_t rs = get_rs(block.exit_instr.instruction);
                     uint32_t rd = get_rd(block.exit_instr.instruction);
 
+                    ss << config_.indent << "{ uint32_t _csp = cpu->gpr[29];\n";
+
                     // Set link register to return address (PC + 8, past delay slot)
                     ss << config_.indent << fmt::format("{} = 0x{:08X};  /* jalr return addr */\n",
                                                         reg_name(rd), addr + 8);
@@ -1352,9 +1353,13 @@ std::string CodeGenerator::translate_basic_block(
                     // Dispatch indirect call — target is a runtime register value
                     ss << config_.indent << fmt::format("call_by_address(cpu, {});  /* jalr {} */\n",
                                                         reg_name(rs), reg_name(rs));
-                    /* psx_dispatch_call validated the (ra, sp) contract;
-                     * only propagate an active bail unwind here. */
-                    ss << config_.indent << "if (g_psx_call_bail) return;\n";
+                    /* Regular jalr $ra calls must honor the same return-address
+                     * and stack contract as direct calls. */
+                    if (rd == 31) {
+                        ss << config_.indent << fmt::format("if (psx_call_contract(cpu, 0x{:08X}u, _csp)) return; }}\n", addr + 8);
+                    } else {
+                        ss << config_.indent << "if (g_psx_call_bail) return; (void)_csp; }\n";
+                    }
 
                     // Continue to successor block (instruction at return address)
                     if (!block.successors.empty()) {

@@ -130,6 +130,12 @@ jmp_buf exception_jmpbuf;  /* non-static so traps.c can deferred-longjmp */
 void* g_exception_owner_fiber = NULL;
 int   g_pending_exception_longjmp = 0;
 extern int g_psx_dispatch_depth;
+extern int g_psx_dispatch_epoch;
+
+static void psx_dispatch_depth_reset_to(int depth) {
+    g_psx_dispatch_depth = depth > 0 ? depth : 0;
+    g_psx_dispatch_epoch++;
+}
 
 int psx_get_in_exception(void) { return in_exception; }
 
@@ -151,6 +157,7 @@ void interrupts_init(void) {
     dispatch_count = 0;
     in_exception = 0;
     g_psx_dispatch_depth = 0;
+    g_psx_dispatch_epoch = 0;
     total_checks = 0;
     post_exception_cooldown = 0;
     exception_entries_total = 0;
@@ -394,9 +401,10 @@ void psx_check_interrupts(CPUState* cpu) {
 
     /* Record which fiber owns this setjmp. Any subsequent longjmp must
      * happen on this same fiber; if a non-owner fiber needs to longjmp
-     * it must switch back here first (see deferred_exception_longjmp). */
+    * it must switch back here first (see deferred_exception_longjmp). */
     void *prev_owner_fiber = g_exception_owner_fiber;
     int   prev_pending = g_pending_exception_longjmp;
+    int   resume_dispatch_depth = g_psx_dispatch_depth;
     g_exception_owner_fiber = psx_fiber_current();
     g_pending_exception_longjmp = 0;
     /* A bail unwind can never be in flight at exception entry: bail-mode
@@ -419,13 +427,13 @@ void psx_check_interrupts(CPUState* cpu) {
             /* RestoreState redirect: re-dispatch to cpu->pc.
              * GPRs were already set by RestoreState — do NOT restore.
              * Stay in exception context so ReturnFromException works. */
-            g_psx_dispatch_depth = 0;
+            psx_dispatch_depth_reset_to(resume_dispatch_depth);
             debug_server_log_restore_event(3, cpu->pc, (uint32_t)jmp_val);
             target_pc = cpu->pc;
             continue;
         }
         if (jmp_val == 1) {
-            g_psx_dispatch_depth = 0;
+            psx_dispatch_depth_reset_to(resume_dispatch_depth);
             debug_server_log_restore_event(4, cpu->pc, (uint32_t)jmp_val);
         }
         if (jmp_val == 0) {

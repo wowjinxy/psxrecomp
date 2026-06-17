@@ -39,6 +39,36 @@ uint64_t g_dirty_ram_insns_run  = 0;
 uint64_t g_dirty_window_dispatches = 0;  /* capture-window interp dispatches */
 uint64_t g_dirty_ram_aborts     = 0;
 uint64_t g_dirty_ram_guard_yields = 0;
+static uint32_t g_static_text_start = DIRTY_RAM_KERNEL_WINDOW_END;
+static uint32_t g_overlay_region_floor = DIRTY_RAM_OVERLAY_FLOOR_DEFAULT;
+
+uint32_t dirty_ram_static_text_start(void) {
+    return g_static_text_start;
+}
+
+uint32_t dirty_ram_overlay_region_floor(void) {
+    return g_overlay_region_floor;
+}
+
+void dirty_ram_set_overlay_region_floor(uint32_t phys) {
+    if (phys < DIRTY_RAM_OVERLAY_FLOOR_DEFAULT)
+        phys = DIRTY_RAM_OVERLAY_FLOOR_DEFAULT;
+    if (phys > 0x200000u)
+        phys = 0x200000u;
+    g_overlay_region_floor = phys;
+}
+
+void dirty_ram_set_static_text_window(uint32_t start_phys, uint32_t end_phys) {
+    if (start_phys < DIRTY_RAM_KERNEL_WINDOW_END)
+        start_phys = DIRTY_RAM_KERNEL_WINDOW_END;
+    if (start_phys > 0x200000u)
+        start_phys = 0x200000u;
+    g_static_text_start = start_phys;
+
+    if (end_phys < start_phys)
+        end_phys = start_phys;
+    dirty_ram_set_overlay_region_floor(end_phys);
+}
 
 /* Mid-block unsupported-opcode counters. Bumped instead of fprintf-spamming
  * stderr (CLAUDE.md §3). Read via dirty_ram_get_unsupported(). The "last_*"
@@ -314,7 +344,9 @@ static int abort_unsupported(uint32_t pc, uint32_t insn, const char *reason) {
  * native coverage comes from overlay_loader candidates, not interp chaining. */
 static int is_local_dirty_target(uint32_t target) {
     uint32_t phys = target & 0x1FFFFFFFu;
-    return phys >= OVERLAY_REGION_FLOOR && dirty_ram_is_dirty(phys);
+    return phys >= DIRTY_RAM_KERNEL_WINDOW_END &&
+           overlay_cache_window_contains(phys) &&
+           dirty_ram_is_dirty(phys);
 }
 
 /* Target the last interp run handed back to the dispatch loop (chained
@@ -369,6 +401,42 @@ static int dirty_ram_word_looks_decodable(uint32_t insn) {
     default:
         return 0;
     }
+}
+
+/* A zero word is a valid MIPS NOP, so the decoder above must allow it for
+ * delay slots and ordinary code padding. As a dirty-RAM entry, though, a run
+ * of zero words in game/overlay RAM is almost always cleared scratch or an
+ * overlay that has already been discarded. Interpreting it as executable code
+ * turns a bad function pointer into a million-instruction NOP ocean. Keep the
+ * BIOS/kernel window permissive because install stubs can be tiny and odd;
+ * filter only game/overlay dirty entries. */
+static int dirty_ram_entry_looks_executable(uint32_t phys) {
+    uint32_t w0 = fetch_word(phys);
+    if (!dirty_ram_word_looks_decodable(w0)) return 0;
+
+    if (phys >= DIRTY_RAM_KERNEL_WINDOW_END && w0 == 0u) {
+        if (phys + 16u > 0x200000u) return 0;
+        if (fetch_word(phys + 4u) == 0u &&
+            fetch_word(phys + 8u) == 0u &&
+            fetch_word(phys + 12u) == 0u) {
+            g_dirty_ram_last_unsupported_entry = phys;
+            g_dirty_ram_last_unsupported_pc = phys;
+            g_dirty_ram_last_unsupported_insn = 0u;
+            g_dirty_ram_last_unsupported_reason = "zero-filled dirty entry";
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int dirty_ram_zero_stream(uint32_t phys) {
+    if (phys < DIRTY_RAM_KERNEL_WINDOW_END || phys + 16u > 0x200000u)
+        return 0;
+    return fetch_word(phys) == 0u &&
+           fetch_word(phys + 4u) == 0u &&
+           fetch_word(phys + 8u) == 0u &&
+           fetch_word(phys + 12u) == 0u;
 }
 
 static int dispatch_nonlocal_call(CPUState *cpu, uint32_t target,
@@ -651,7 +719,7 @@ static int exec_one(CPUState *cpu, uint32_t pc, uint32_t *next_pc_out) {
         if (!is_local_dirty_target(target)) {
             return dispatch_nonlocal_call(cpu, target, return_pc, next_pc_out);
         }
-        if (!dirty_ram_word_looks_decodable(fetch_word(target & 0x1FFFFFFFu))) {
+        if (!dirty_ram_entry_looks_executable(target & 0x1FFFFFFFu)) {
             return dispatch_nonlocal_call(cpu, target, return_pc, next_pc_out);
         }
         cpu->pc = target;
@@ -973,6 +1041,8 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
 #define OV_FPLOG_RET1() do { if (_ovfp) overlay_fp_log(addr, _in_regs, cpu, 0); return 1; } while (0)
 
     if (!dirty_ram_is_dirty(phys)) return 0;
+    if (!overlay_cache_window_contains(phys)) return 0;
+    if (!dirty_ram_entry_looks_executable(phys)) return 0;
 
     /* Interp-pressure signal for variant-capture automation (step 2.8):
      * counts dispatches the interpreter actually handles inside a capture
@@ -984,7 +1054,9 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     g_unsupported_seen = 0;
     /* Overlay region only — kernel window stays per-block (see
      * is_local_dirty_target). */
-    int allow_local_dirty_flow = (phys >= OVERLAY_REGION_FLOOR);
+    int allow_local_dirty_flow =
+        phys >= DIRTY_RAM_KERNEL_WINDOW_END &&
+        overlay_cache_window_contains(phys);
 
     /* Per-PC entry counter (visible via dirty_ram_stats). */
     DirtyRamPcEntry *pc_entry = pc_table_get_or_insert(phys);
@@ -1032,7 +1104,23 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
     int insns_executed = 0;
     for (int i = 0; i < MAX_INSNS_PER_DISPATCH; i++) {
         uint32_t next_pc = 0;
-        uint32_t insn = fetch_word(pc & 0x1FFFFFFFu);
+        uint32_t cur_phys = pc & 0x1FFFFFFFu;
+        uint32_t insn = fetch_word(cur_phys);
+        if (insns_executed != 0 && dirty_ram_zero_stream(cur_phys)) {
+            g_insn_log_frozen = 1;
+            g_dirty_ram_unsupported_midblock++;
+            g_dirty_ram_last_unsupported_entry = addr;
+            g_dirty_ram_last_unsupported_entry_ra = cpu->gpr[31];
+            g_dirty_ram_last_unsupported_entry_sp = cpu->gpr[29];
+            g_dirty_ram_last_unsupported_insns = (uint32_t)insns_executed;
+            g_dirty_ram_last_unsupported_pc = pc;
+            g_dirty_ram_last_unsupported_insn = 0u;
+            g_dirty_ram_last_unsupported_reason = "zero-filled dirty stream";
+            g_dirty_ram_blocks_run++;
+            cpu->pc = 0;
+            if (pc_entry) pc_entry->insns += (uint64_t)insns_executed;
+            OV_FPLOG_RET1();
+        }
         uint32_t before_s0 = cpu->gpr[16];
         int transferred = exec_one(cpu, pc, &next_pc);
 #ifdef PSX_ENABLE_BLOCK_CYCLES
@@ -1099,11 +1187,9 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
                 cpu->pc = target;  /* not compiled: restore surfaced target */
             }
 #endif
-            uint32_t target_phys = target & 0x1FFFFFFFu;
             if (allow_local_dirty_flow && target != 0 &&
                 target != stop_addr &&
-                target_phys >= OVERLAY_REGION_FLOOR &&
-                dirty_ram_is_dirty(target_phys)) {
+                is_local_dirty_target(target)) {
                 /* Capture freeze gates ONLY the ring write — never flow. */
                 if (!g_insn_log_frozen) {
                     uint64_t s = g_dirty_ram_flow_log_seq++;
@@ -1155,6 +1241,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
             OV_FPLOG_RET1();
         }
     }
+    g_insn_log_frozen = 1;
     g_dirty_ram_last_unsupported_pc = pc;
     g_dirty_ram_last_unsupported_insn = fetch_word(pc & 0x1FFFFFFFu);
     g_dirty_ram_last_unsupported_reason = "instruction guard";

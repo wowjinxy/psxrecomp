@@ -1,0 +1,11 @@
+# Runtime dispatch continuations from the post-logo loading wait loop.
+interior 0x800AB948
+interior 0x800AB970
+interior 0x800C122C
+interior 0x800C1234
+interior 0x800C0030
+interior 0x80043858
+interior 0x800DCDC0
+
+# The callees at 0x8001B264, 0x80015A94, and 0x80011DB4 live below
+# the PS-X EXE load address and are handled by the dirty-RAM low-code window.

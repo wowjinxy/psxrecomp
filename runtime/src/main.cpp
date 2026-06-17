@@ -10,6 +10,7 @@
 #include "cdrom.h"
 #include "fntrace.h"
 #include "boot_state.h"
+#include "dirty_ram_interp.h"
 #include "overlay_capture.h"
 #include "overlay_loader.h"
 #include "autocompile.h"
@@ -103,10 +104,11 @@ static SDL_Texture*  sdl_texture;
  * [controller] settings the launcher writes; the runtime opens the matching
  * SDL controller (or uses the keyboard) and feeds each PSX pad slot. */
 struct PlayerInput {
-    int   kind = 0;            /* 0=none, 1=keyboard, 2=controller */
+    int   kind = 0;            /* 0=none, 1=keyboard, 2=controller/joystick */
     char  guid[40] = {0};      /* SDL joystick GUID string when kind==controller */
     bool  analog = false;      /* DualShock (analog) vs digital pad */
     SDL_GameController* handle = nullptr;
+    SDL_Joystick*       raw_handle = nullptr;
     SDL_JoystickID      instance = -1;
 };
 static PlayerInput g_players[2];
@@ -202,6 +204,12 @@ int      g_present_vsync_disabled = 0; /* 1 once self-heal tripped */
 extern "C" {
 int      g_turbo_loads_enabled = 0;
 uint64_t g_turbo_loads_frames  = 0;   /* vblanks run unpaced (observability) */
+}
+static uint32_t g_game_stack_base = 0;
+static uint32_t g_game_stack_word = 0;
+extern "C" void psx_game_entry_patch(CPUState* cpu) {
+    if (!cpu || g_game_stack_word == 0 || g_game_stack_base == 0) return;
+    cpu->write_word(g_game_stack_word, g_game_stack_base & 0x1FFFFFFFu);
 }
 static SDL_AudioDeviceID sdl_audio_device;
 static int16_t       sdl_audio_buf[2048 * 2];
@@ -921,8 +929,12 @@ static void close_player(PlayerInput& p) {
     if (p.handle) {
         SDL_GameControllerClose(p.handle);
         p.handle = nullptr;
-        p.instance = -1;
     }
+    if (p.raw_handle) {
+        SDL_JoystickClose(p.raw_handle);
+        p.raw_handle = nullptr;
+    }
+    p.instance = -1;
 }
 
 static void close_controller(void) {
@@ -930,36 +942,74 @@ static void close_controller(void) {
     close_player(g_players[1]);
 }
 
-/* Open the SDL controller whose GUID matches p.guid. If no exact GUID match
- * exists (e.g. a different physical unit of the same model, or Steam's virtual
- * pad at an unpredictable slot), fall back to the first controller not already
- * claimed by the other player. */
-static void open_player(PlayerInput& p, const PlayerInput& other) {
-    if (p.kind != 2 || p.handle) return;
+static bool player_has_open_device(const PlayerInput& p) {
+    return p.handle || p.raw_handle;
+}
 
-    int chosen = -1, fallback = -1;
+static bool device_is_claimed_by(const PlayerInput& p, int device_index) {
+    if (!player_has_open_device(p)) return false;
+    SDL_JoystickID inst = SDL_JoystickGetDeviceInstanceID(device_index);
+    return inst >= 0 && inst == p.instance;
+}
+
+static void device_guid_string(int device_index, char out[40]) {
+    SDL_JoystickGUID g = SDL_JoystickGetDeviceGUID(device_index);
+    SDL_JoystickGetGUIDString(g, out, 40);
+}
+
+static int choose_input_device(const PlayerInput& p, const PlayerInput& other,
+                               bool game_controller_only) {
+    int first = -1;
+    int indexed = -1;
+    int ordinal = 0;
     const int joysticks = SDL_NumJoysticks();
     for (int i = 0; i < joysticks; i++) {
-        if (!SDL_IsGameController(i)) continue;
-        SDL_JoystickGUID g = SDL_JoystickGetDeviceGUID(i);
-        char buf[40] = {0};
-        SDL_JoystickGetGUIDString(g, buf, sizeof(buf));
-        /* Skip a device already opened by the other player. */
-        SDL_JoystickID inst = SDL_JoystickGetDeviceInstanceID(i);
-        if (other.handle && other.instance == inst) continue;
-        if (p.guid[0] && std::strcmp(buf, p.guid) == 0) { chosen = i; break; }
-        if (fallback < 0) fallback = i;
-    }
-    if (chosen < 0) chosen = fallback;
-    if (chosen < 0) return;
+        if (game_controller_only && !SDL_IsGameController(i)) continue;
+        if (device_is_claimed_by(other, i)) continue;
 
-    p.handle = SDL_GameControllerOpen(chosen);
+        char buf[40] = {0};
+        device_guid_string(i, buf);
+        if (p.guid[0] && std::strcmp(buf, p.guid) == 0) return i;
+        if (!p.guid[0] && ordinal == controller_device_index) indexed = i;
+        if (first < 0) first = i;
+        ordinal++;
+    }
+    return indexed >= 0 ? indexed : first;
+}
+
+/* Open the SDL controller whose GUID matches p.guid. If no exact GUID match
+ * exists (e.g. a different physical unit of the same model, or Steam's virtual
+ * pad at an unpredictable slot), fall back to the configured device index.
+ * If SDL lacks a GameController mapping for the device, open it as a raw
+ * joystick so DirectInput-style pads can still drive the PSX controller. */
+static void open_player(PlayerInput& p, const PlayerInput& other) {
+    if (p.kind != 2 || player_has_open_device(p)) return;
+
+    int chosen = choose_input_device(p, other, true);
+    if (chosen >= 0) p.handle = SDL_GameControllerOpen(chosen);
     if (p.handle) {
         SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
         p.instance = joy ? SDL_JoystickInstanceID(joy) : -1;
         const char* name = SDL_GameControllerName(p.handle);
         std::fprintf(stdout, "psxrecomp runtime: opened controller for slot: %s\n",
                      name ? name : "(unnamed)");
+        return;
+    }
+
+    chosen = choose_input_device(p, other, false);
+    if (chosen < 0) return;
+
+    p.raw_handle = SDL_JoystickOpen(chosen);
+    if (p.raw_handle) {
+        p.instance = SDL_JoystickInstanceID(p.raw_handle);
+        const char* name = SDL_JoystickName(p.raw_handle);
+        std::fprintf(stdout,
+                     "psxrecomp runtime: opened raw joystick for slot: %s "
+                     "(buttons=%d axes=%d hats=%d)\n",
+                     name ? name : "(unnamed)",
+                     SDL_JoystickNumButtons(p.raw_handle),
+                     SDL_JoystickNumAxes(p.raw_handle),
+                     SDL_JoystickNumHats(p.raw_handle));
     }
 }
 
@@ -1014,6 +1064,84 @@ static bool controller_source_pressed_h(SDL_GameController* h, const ControllerS
     }
 }
 
+static bool raw_button_down(SDL_Joystick* h, int button) {
+    return h && button >= 0 && button < SDL_JoystickNumButtons(h) &&
+           SDL_JoystickGetButton(h, button) != 0;
+}
+
+static Sint16 raw_axis_value(SDL_Joystick* h, int axis) {
+    if (!h || axis < 0 || axis >= SDL_JoystickNumAxes(h)) return 0;
+    return SDL_JoystickGetAxis(h, axis);
+}
+
+static bool raw_hat_down(SDL_Joystick* h, Uint8 mask) {
+    if (!h || SDL_JoystickNumHats(h) <= 0) return false;
+    return (SDL_JoystickGetHat(h, 0) & mask) != 0;
+}
+
+static int raw_button_for_controller_button(int id) {
+    switch ((SDL_GameControllerButton)id) {
+    case SDL_CONTROLLER_BUTTON_A:              return 0;
+    case SDL_CONTROLLER_BUTTON_B:              return 1;
+    case SDL_CONTROLLER_BUTTON_X:              return 2;
+    case SDL_CONTROLLER_BUTTON_Y:              return 3;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:   return 4;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:  return 5;
+    case SDL_CONTROLLER_BUTTON_BACK:           return 6;
+    case SDL_CONTROLLER_BUTTON_START:          return 7;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:      return 8;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK:     return 9;
+    case SDL_CONTROLLER_BUTTON_GUIDE:          return 10;
+    default:                                   return -1;
+    }
+}
+
+static bool raw_dpad_button_down(SDL_Joystick* h, int id) {
+    switch ((SDL_GameControllerButton)id) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        return raw_hat_down(h, SDL_HAT_UP);
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        return raw_hat_down(h, SDL_HAT_DOWN);
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        return raw_hat_down(h, SDL_HAT_LEFT);
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        return raw_hat_down(h, SDL_HAT_RIGHT);
+    default:
+        return false;
+    }
+}
+
+static int raw_axis_for_controller_axis(int id) {
+    switch ((SDL_GameControllerAxis)id) {
+    case SDL_CONTROLLER_AXIS_LEFTX:        return 0;
+    case SDL_CONTROLLER_AXIS_LEFTY:        return 1;
+    case SDL_CONTROLLER_AXIS_RIGHTX:       return 2;
+    case SDL_CONTROLLER_AXIS_RIGHTY:       return 3;
+    case SDL_CONTROLLER_AXIS_TRIGGERLEFT:  return 4;
+    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return 5;
+    default:                               return -1;
+    }
+}
+
+static bool raw_source_pressed_h(SDL_Joystick* h, const ControllerSource& source) {
+    if (!h) return false;
+
+    switch (source.kind) {
+    case ControllerSource::Kind::Button:
+        return raw_dpad_button_down(h, source.id) ||
+               raw_button_down(h, raw_button_for_controller_button(source.id));
+    case ControllerSource::Kind::AxisPositive:
+        return raw_axis_value(h, raw_axis_for_controller_axis(source.id)) >
+               controller_deadzone;
+    case ControllerSource::Kind::AxisNegative:
+        return raw_axis_value(h, raw_axis_for_controller_axis(source.id)) <
+               -controller_deadzone;
+    case ControllerSource::Kind::None:
+    default:
+        return false;
+    }
+}
+
 static uint16_t pad_from_keyboard(void) {
     const Uint8* keys = SDL_GetKeyboardState(NULL);
     uint16_t buttons = 0xFFFF; /* all released */
@@ -1050,6 +1178,20 @@ static uint16_t controller_pad_buttons(SDL_GameController* h) {
     return buttons;
 }
 
+static uint16_t raw_joystick_pad_buttons(SDL_Joystick* h) {
+    uint16_t buttons = 0xFFFF;  /* all released */
+    if (!h) return buttons;
+    for (const auto& entry : controller_map) {
+        for (const auto& source : entry.sources) {
+            if (raw_source_pressed_h(h, source)) {
+                buttons &= (uint16_t)~entry.bit;
+                break;
+            }
+        }
+    }
+    return buttons;
+}
+
 /* Map an SDL axis (-32768..32767) to a PSX analog byte (0..255, 0x80 centred),
  * applying the configured centre deadzone: travel within controller_deadzone
  * reads as centred (0x80) and the remaining travel is rescaled to the full range
@@ -1072,7 +1214,10 @@ static uint8_t axis_to_pad_byte(int16_t v) {
 /* Buttons for a player's selected device (0xFFFF = none pressed). */
 static uint16_t pad_buttons_for(const PlayerInput& p) {
     if (p.kind == 1) return pad_from_keyboard();
-    if (p.kind == 2) return controller_pad_buttons(p.handle);
+    if (p.kind == 2) {
+        if (p.handle) return controller_pad_buttons(p.handle);
+        return raw_joystick_pad_buttons(p.raw_handle);
+    }
     return 0xFFFF;
 }
 
@@ -1105,6 +1250,17 @@ static void pad_sticks_for(const PlayerInput& p, uint8_t out[4]) {
         if (SDL_GameControllerGetButton(p.handle, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) out[0] = 0xFF;
         if (SDL_GameControllerGetButton(p.handle, SDL_CONTROLLER_BUTTON_DPAD_UP))    out[1] = 0x00;
         if (SDL_GameControllerGetButton(p.handle, SDL_CONTROLLER_BUTTON_DPAD_DOWN))  out[1] = 0xFF;
+        return;
+    }
+    if (p.kind == 2 && p.raw_handle) {
+        out[0] = axis_to_pad_byte(raw_axis_value(p.raw_handle, 0));
+        out[1] = axis_to_pad_byte(raw_axis_value(p.raw_handle, 1));
+        out[2] = axis_to_pad_byte(raw_axis_value(p.raw_handle, 2));
+        out[3] = axis_to_pad_byte(raw_axis_value(p.raw_handle, 3));
+        if (raw_hat_down(p.raw_handle, SDL_HAT_LEFT))  out[0] = 0x00;
+        if (raw_hat_down(p.raw_handle, SDL_HAT_RIGHT)) out[0] = 0xFF;
+        if (raw_hat_down(p.raw_handle, SDL_HAT_UP))    out[1] = 0x00;
+        if (raw_hat_down(p.raw_handle, SDL_HAT_DOWN))  out[1] = 0xFF;
     }
 }
 
@@ -1151,11 +1307,22 @@ static void sdl_vblank_present(void) {
             psx_crash_trace_set_exit_origin("sdl_window_close");
             shutdown_runtime();
             std::exit(0);
-        } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+        } else if (ev.type == SDL_CONTROLLERDEVICEADDED ||
+                   ev.type == SDL_JOYDEVICEADDED) {
             refresh_player_devices();
         } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-            if (ev.cdevice.which == g_players[0].instance ||
-                ev.cdevice.which == g_players[1].instance) {
+            if ((player_has_open_device(g_players[0]) &&
+                 ev.cdevice.which == g_players[0].instance) ||
+                (player_has_open_device(g_players[1]) &&
+                 ev.cdevice.which == g_players[1].instance)) {
+                close_controller();
+                refresh_player_devices();
+            }
+        } else if (ev.type == SDL_JOYDEVICEREMOVED) {
+            if ((player_has_open_device(g_players[0]) &&
+                 ev.jdevice.which == g_players[0].instance) ||
+                (player_has_open_device(g_players[1]) &&
+                 ev.jdevice.which == g_players[1].instance)) {
                 close_controller();
                 refresh_player_devices();
             }
@@ -1603,6 +1770,10 @@ int main(int argc, char** argv) {
             g_auto_skip_fmv    = gc.runtime.video_auto_skip_fmv ? 1 : 0;
             /* [controller] game-declared input defaults (settings.toml/launcher
              * still override below). */
+            if (gc.runtime.has_default_p1_device)
+                p1_device = gc.runtime.default_p1_device;
+            if (gc.runtime.has_default_p2_device)
+                p2_device = gc.runtime.default_p2_device;
             if (gc.runtime.has_default_analog) {
                 p1_analog = gc.runtime.default_p1_analog;
                 p2_analog = gc.runtime.default_p2_analog;
@@ -1611,6 +1782,19 @@ int main(int argc, char** argv) {
             { const char *e = std::getenv("PSX_GL_FORCE_CPU_PRESENT");
               if (e && e[0] && e[0] != '0') g_gl_fbo_present = 0; }
             game_entry_pc = gc.entry_pc;
+            g_game_stack_base = gc.stack_base;
+            g_game_stack_word = gc.stack_word;
+            {
+                uint32_t text_start = gc.load_address & 0x1FFFFFFFu;
+                uint32_t text_end =
+                    (gc.load_address + gc.text_size) & 0x1FFFFFFFu;
+                dirty_ram_set_static_text_window(text_start, text_end);
+                if (text_start > DIRTY_RAM_KERNEL_WINDOW_END) {
+                    dirty_ram_mark_executable_range(
+                        DIRTY_RAM_KERNEL_WINDOW_END,
+                        text_start - DIRTY_RAM_KERNEL_WINDOW_END);
+                }
+            }
             fast_boot     = gc.runtime.fast_boot;
             /* Overlay DLL cache (Layer A). Off unless enabled in [runtime];
              * when on, capture overlay bytes and scan cache/<game_id>/ for
@@ -1756,7 +1940,7 @@ int main(int argc, char** argv) {
         force_launcher ||
         (!std::getenv("PSX_NO_LAUNCHER") && !force_no_launcher && !skip_launcher_setting);
     if (want_launcher) {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) == 0) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) == 0) {
             PSXRecompV4::UserSettings seed;
             seed.renderer = g_video_renderer;             seed.has_renderer = true;
             seed.supersampling = g_video_scale;           seed.has_supersampling = true;
@@ -1988,12 +2172,11 @@ int main(int argc, char** argv) {
      * window is resized; nearest preserves crisp pixels otherwise. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, g_video_aa ? "1" : "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    /* Prefer SDL's own HIDAPI driver over platform-native so Steam's virtual
-     * Xbox controller (injected by Steam Input / Remote Play) is enumerated
-     * as a game controller rather than a raw HID device. */
+    /* Use SDL's mapped controller path when possible, and keep RawInput enabled
+     * so older DirectInput-style pads still appear to the raw joystick fallback. */
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
-    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -2264,6 +2447,18 @@ int main(int argc, char** argv) {
     std::fflush(stderr);
 #else
     psx_dispatch(&cpu, cpu.pc);
+#endif
+
+#ifndef PSX_NO_DEBUG_TOOLS
+    if (const char* hold_ms_env = std::getenv("PSX_HOLD_AFTER_DISPATCH_MS")) {
+        int hold_ms = std::atoi(hold_ms_env);
+        if (hold_ms < 0) hold_ms = 0;
+        const Uint32 hold_start = SDL_GetTicks();
+        while ((int)(SDL_GetTicks() - hold_start) < hold_ms) {
+            debug_server_poll();
+            SDL_Delay(10);
+        }
+    }
 #endif
 
     /* If we reach here, all execution completed without MMIO abort. */

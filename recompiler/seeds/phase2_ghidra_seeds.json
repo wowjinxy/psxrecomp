@@ -1,7 +1,7 @@
 {
   "schema": "psxrecomp phase2 seeds",
   "source": "generated/ghidra_function_starts.json + phase1c seeds + dispatch_miss_seeds + preserved manual",
-  "seed_count": 1072,
+  "seed_count": 1074,
   "seeds": [
     {
       "address": "0xBFC00000",
@@ -144,6 +144,11 @@
       "rationale": "Ghidra function start"
     },
     {
+      "address": "0xBFC025BC",
+      "label": "bios_exec_return_BFC025BC",
+      "rationale": "Return continuation used by Bomberman Fantasy Race after BIOS launches the game entry"
+    },
+    {
       "address": "0xBFC02738",
       "label": "ghidra_BFC02738",
       "rationale": "Ghidra function start"
@@ -212,6 +217,11 @@
       "address": "0xBFC03190",
       "label": "ghidra_BFC03190",
       "rationale": "Ghidra function start"
+    },
+    {
+      "address": "0xBFC0323C",
+      "label": "bios_strncat_return_BFC0323C",
+      "rationale": "Interior BIOS return target reached during Bomberman Fantasy Race boot"
     },
     {
       "address": "0xBFC03288",

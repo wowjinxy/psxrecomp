@@ -22,6 +22,7 @@ static uint32_t s_game_entry_phys = 0;
 static int      s_game_started = 0;
 extern void cdrom_notify_game_started(void);
 extern void boot_state_trigger_capture(const CPUState* cpu);
+extern void psx_game_entry_patch(CPUState* cpu);
 
 void fntrace_set_game_range(uint32_t lo, uint32_t hi) {
     /* lo is treated as entry_pc; hi is ignored (kept for API compat). */
@@ -49,6 +50,7 @@ void fntrace_record(CPUState* cpu, uint32_t target) {
     if (!s_game_started && s_game_entry_phys != 0) {
         if ((target & 0x1FFFFFFFu) == s_game_entry_phys) {
             s_game_started = 1;
+            psx_game_entry_patch(cpu);
             cdrom_notify_game_started();
             boot_state_trigger_capture(cpu);
         }

@@ -1,0 +1,38 @@
+[game]
+name = "PaRappa the Rapper"
+id = "SCUS-94183"
+exe = "../extracted/PaRappa the Rapper/scus_941.83"
+load_address = "0x80010000"
+entry_pc = "0x80028590"
+text_size = "0x0005F000"
+stack_base = "0x801FFFF0"
+disc = "../extracted/PaRappa the Rapper/PaRappa the Rapper.cue"
+disc_crc = "0xD94EA30C"
+disc_sha1 = "181e2efd2a29c028b28e52ac7827ef7a172ca8b4"
+
+[recompiler]
+seeds = "games/parappa-the-rapper/seeds.txt"
+out_dir = "generated"
+strict = true
+out_stem = "scus_941.83"
+
+[runtime]
+debug_port = 4374
+window_title = "PaRappa the Rapper"
+memcard_dir = "saves/parappa-the-rapper"
+disc_speed = "1x"
+overlay_cache = true
+overlay_backend = "sljit"
+
+[video]
+renderer = "software"
+supersampling = 1
+antialiasing = true
+texture_filtering = "nearest"
+crt_filter = "raw"
+aspect_ratio = "4:3"
+
+[controller]
+p1_device = "auto"
+p1_analog = false
+p2_analog = false

@@ -1,0 +1,6 @@
+# Extra static-discovery seeds for Silhouette Mirage (SLUS-00728).
+#
+# Add one hex address per line for confirmed function entries inside the
+# main PS-X EXE. Use these prefixes when runtime evidence calls for them:
+#   interior 0xXXXXXXXX
+#   dispatch_root 0xXXXXXXXX
