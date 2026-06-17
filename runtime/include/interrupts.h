@@ -31,6 +31,12 @@ void psx_check_interrupts(struct CPUState* cpu);
 /* Compat shim for ape-flavored generated code (forwards to psx_check_interrupts). */
 void psx_check_interrupts_at(struct CPUState* cpu, uint32_t resume_pc);
 
+/* Suppress hardware time/IRQ delivery while runtime validation replays code
+ * from snapshots.  The counter is nestable so probes can compose safely. */
+void psx_interrupts_suppress_push(void);
+void psx_interrupts_suppress_pop(void);
+int psx_interrupts_suppressed(void);
+
 /* Accumulate emitted PSX cycles toward the next VBlank trigger.
  * Called from psx_advance_cycles() so the VBlank rate is gated on
  * guest cycles (correct PSX timing) rather than block-dispatch

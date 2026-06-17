@@ -414,7 +414,7 @@ void psx_syscall(CPUState* cpu, uint32_t code) {
                 }
             }
             /* Fallback: simple RFE on current SR. */
-            cpu->cop0[12] = (sr & ~0x0Fu) | ((sr >> 2) & 0x0Fu);
+            cpu->cop0[12] = (sr & ~0x3Fu) | ((sr >> 2) & 0x0Fu);
             cpu->pc = cpu->cop0[14];
             return;
         }
@@ -437,7 +437,7 @@ void psx_syscall(CPUState* cpu, uint32_t code) {
 
     /* Early boot fallback for syscall 3. */
     if (func == 3) {
-        cpu->cop0[12] = (sr & ~0x0Fu) | ((sr >> 2) & 0x0Fu);
+        cpu->cop0[12] = (sr & ~0x3Fu) | ((sr >> 2) & 0x0Fu);
         cpu->pc = cpu->cop0[14];
         return;
     }

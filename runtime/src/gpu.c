@@ -18,6 +18,7 @@
 #include "cpu_state.h"
 #include "event_ring.h"
 #include "color_lut.h"
+#include "psx_cycles.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -536,10 +537,13 @@ static int sq_cap_armed;
  * function would spin forever.
  *
  * Fix: count GPUSTAT reads and trigger a vblank when the BIOS has polled
- * enough times, approximating the real hardware timing where the field
- * flips every ~33,868 GPU clocks (one NTSC frame). */
+ * enough times, then only let the synthetic edge fire once per real PSX
+ * frame worth of guest cycles.  The read-count gate detects a tight poll
+ * loop; the cycle gate prevents that loop from manufacturing a VBlank storm. */
 #define GPUSTAT_POLL_VBLANK_THRESHOLD 1000
+#define GPUSTAT_SYNTH_VBLANK_CYCLES 564480u
 static uint32_t gpustat_poll_count;
+static uint64_t gpustat_last_synth_cycle;
 
 /* ---- Initialization ---- */
 
@@ -596,6 +600,7 @@ void gpu_init(void) {
 
     gpuread_latch = 0;
     gpustat_poll_count = 0;
+    gpustat_last_synth_cycle = psx_get_cycle_count();
 }
 
 /* ---- GPUSTAT read (0x1F801814) ---- */
@@ -614,12 +619,20 @@ uint32_t gpu_read_gpustat(void) {
      * psx_check_interrupts (cycle-paced). */
     gpustat_poll_count++;
     if (gpustat_poll_count >= GPUSTAT_POLL_VBLANK_THRESHOLD) {
-        gpustat_poll_count = 0;
-        lcf ^= 1;
-        i_stat |= (1u << 0); /* IRQ_VBLANK */
-        /* DEQUEUE: VBlank fired via the GPUSTAT-poll fallback path (distinct
-         * from the cycle-paced VBlank in psx_check_interrupts). */
-        event_ring_record_aux(EV_DEQ, (uint8_t)SRC_VBLANK, 0xFFFFFFFFu);
+        uint64_t now = psx_get_cycle_count();
+        if (now - gpustat_last_synth_cycle >= GPUSTAT_SYNTH_VBLANK_CYCLES) {
+            gpustat_poll_count = 0;
+            gpustat_last_synth_cycle = now;
+            lcf ^= 1;
+            if ((i_stat & (1u << 0)) == 0) {
+                i_stat |= (1u << 0); /* IRQ_VBLANK */
+                /* DEQUEUE: VBlank fired via the GPUSTAT-poll fallback path
+                 * (distinct from the cycle-paced VBlank in psx_check_interrupts). */
+                event_ring_record_aux(EV_DEQ, (uint8_t)SRC_VBLANK, 0xFFFFFFFFu);
+            }
+        } else {
+            gpustat_poll_count = GPUSTAT_POLL_VBLANK_THRESHOLD;
+        }
     }
 
     uint32_t stat = 0;
@@ -730,6 +743,7 @@ static uint16_t rgb888_to_rgb555(uint32_t color24) {
 void gpu_vblank_tick(void) {
     lcf ^= 1;
     gpustat_poll_count = 0;
+    gpustat_last_synth_cycle = psx_get_cycle_count();
     i_stat |= (1u << 0); /* IRQ_VBLANK */
     if (vblank_callback) vblank_callback();
 }

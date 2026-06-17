@@ -857,7 +857,7 @@ static int exec_one(CPUState *cpu, uint32_t pc, uint32_t *next_pc_out) {
         }
         if (cop_op == 0x10 && fnt == 0x10) { /* RFE */
             uint32_t sr = cpu->cop0[12];
-            cpu->cop0[12] = (sr & 0xFFFFFFF0u) | ((sr >> 2) & 0x0Fu);
+            cpu->cop0[12] = (sr & 0xFFFFFFC0u) | ((sr >> 2) & 0x0Fu);
             return 0;
         }
         return abort_unsupported(pc, insn, "COP0 op");

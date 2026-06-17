@@ -72,6 +72,7 @@ extern uint32_t i_mask;
 static uint32_t dispatch_count;
 static uint64_t total_checks;
 static uint32_t cycles_since_vblank;  /* incremented by interrupts_advance_cycles */
+static int interrupt_suppress_count;
 
 void interrupts_advance_cycles(uint32_t cycles) {
     cycles_since_vblank += cycles;
@@ -139,6 +140,19 @@ static void psx_dispatch_depth_reset_to(int depth) {
 
 int psx_get_in_exception(void) { return in_exception; }
 
+void psx_interrupts_suppress_push(void) {
+    interrupt_suppress_count++;
+}
+
+void psx_interrupts_suppress_pop(void) {
+    if (interrupt_suppress_count > 0)
+        interrupt_suppress_count--;
+}
+
+int psx_interrupts_suppressed(void) {
+    return interrupt_suppress_count > 0;
+}
+
 void psx_get_freeze_diag(uint64_t *out_total_checks,
                          uint32_t *out_dispatch_count,
                          int *out_in_exception,
@@ -162,6 +176,7 @@ void interrupts_init(void) {
     post_exception_cooldown = 0;
     exception_entries_total = 0;
     exception_reentry_blocks = 0;
+    interrupt_suppress_count = 0;
 }
 
 /*
@@ -213,6 +228,14 @@ void psx_check_interrupts(CPUState* cpu) {
     total_checks++;
     if ((total_checks & 0x3FFFu) == 0) {
         debug_server_poll();
+    }
+
+    if (interrupt_suppress_count > 0) {
+        if ((i_stat & i_mask) != 0)
+            irq_record_outcome(EV_IRQ_GATE, GATE_SUPPRESSED);
+        else
+            irq_record_outcome(EV_NONE, 0);
+        return;
     }
 
     /* SIO delayed IRQ delivery removed from here.
@@ -279,10 +302,12 @@ void psx_check_interrupts(CPUState* cpu) {
             uint64_t since_progress = total_checks - total_checks_at_progress;
             int progress_stale = since_progress >= VBLANK_DEFER_STALE;
             if (!card_active || progress_stale) {
-                /* Subtract one VBlank period rather than reset to 0 so
-                 * cycle overshoot carries forward. Prevents long-running
-                 * blocks from rounding multiple VBlanks together. */
-                cycles_since_vblank -= VBLANK_CYCLES;
+                /* I_STAT only latches a pending VBlank bit; it does not queue
+                 * one interrupt per missed display period.  If card deferral,
+                 * exception work, or a long block lets several periods pile up,
+                 * keep the fractional phase but drop the backlog.  Draining it
+                 * one VSync callback at a time starves main/game draw code. */
+                cycles_since_vblank %= VBLANK_CYCLES;
                 dispatch_count = 0;
                 /* DEQUEUE: this VBlank fired. ENQUEUE: next VBlank scheduled
                  * one period out. */

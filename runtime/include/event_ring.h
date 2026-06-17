@@ -80,6 +80,7 @@ typedef enum {
     GATE_COOLDOWN     = 2,  /* post-exception cooldown block                   */
     GATE_SR_IE        = 3,  /* COP0 SR IEc clear (interrupts globally off)     */
     GATE_SR_IM2       = 4,  /* COP0 SR IM2 clear (HW int line masked)          */
+    GATE_SUPPRESSED   = 5,  /* runtime shadow/probe suppression is active      */
 } EventGateReason;
 
 typedef enum {

@@ -170,6 +170,7 @@ static uint32_t s_sljit_obsoleted  = 0; /* sljit shards superseded by a gcc DLL*
 static uint32_t s_last_write_pc   = 0;
 static uint32_t s_last_write_addr = 0;
 static uint32_t s_last_write_size = 0;
+static uint64_t s_shadow_skipped_exc = 0;  /* skipped: inside BIOS exception */
 
 extern uint8_t *memory_get_ram_ptr(void);
 extern uint32_t overlay_watch_pagegen_sum(uint32_t phys, uint32_t len);
@@ -904,13 +905,15 @@ void overlay_loader_init(const char *cache_dir, const char *game_id) {
  * forces on) — a dev escape hatch. NOTE: "live" here is VALIDATED-live, not the
  * old blind path; see overlay_loader_dispatch's diff gate. */
 void overlay_loader_apply_live_policy(void) {
-    /* DEFAULT-ON (validated): sljit is live whenever it is AVAILABLE, so it fills
+    /* Historical DEFAULT-ON note (superseded below): sljit is live whenever it is AVAILABLE, so it fills
      * gcc-absent overlay regions even on a gcc dev box (gcc > sljit > interp).
      * "Live" is VALIDATED-live — shards still route through the same-state diff
      * gate (see overlay_loader_dispatch) and device-touching / diverging shards
      * stay on the interpreter, so default-on cannot reintroduce the save-load
      * wedge. The PSX_OVERLAY_SLJIT_LIVE env var still overrides (0 forces off). */
-    int live = (code_provider_sljit() != NULL) ? 1 : 0;
+    /* Current policy: default OFF. Set PSX_OVERLAY_SLJIT_LIVE=1 for explicit
+     * dev validation while the shadow oracle remains non-preemptive. */
+    int live = 0;
     const char *e = getenv("PSX_OVERLAY_SLJIT_LIVE");
     if (e && *e) live = (*e != '0') ? 1 : 0;
     s_sljit_live = live;
@@ -1038,6 +1041,7 @@ int overlay_loader_dispatch(CPUState *cpu, uint32_t addr) {
          * production model — shards created and run live, no per-shard diff).
          * Never inside a shadow run. */
         if (head < 0 && (s_diff_mode || s_sljit_live) && !s_in_shadow &&
+            !psx_get_in_exception() &&
             code_provider_sljit() != NULL) {
             /* head < 0 == no gcc DLL (or any candidate) registered for this region
              * after the cache-load attempt above => gcc-absent => sljit fills the
@@ -1084,6 +1088,10 @@ scan_candidates:
              * can't safely double-execute MMIO/SIO/DMA to validate them, so they
              * always fall to the interpreter (the authoritative single path). */
             if (c->device_touch) { s_disp_interp++; return 0; }
+            if (c->dll < 0 && !s_sljit_live && !s_diff_mode) {
+                s_disp_interp++;
+                return 0;
+            }
             /* Same-state differential: run native+interp from identical state,
              * compare, keep the interp result. Takes precedence over the A/B
              * toggle. Verify-budget: once a candidate has passed cleanly enough
@@ -1100,6 +1108,11 @@ scan_candidates:
              * the trusted tier (validated at dev time) and run native directly;
              * they are diffed only in explicit dev diff mode. */
             int want_diff = s_diff_mode || (s_sljit_live && c->dll < 0);
+            if (psx_get_in_exception() && (want_diff || c->dll < 0)) {
+                s_shadow_skipped_exc++;
+                s_disp_interp++;
+                return 0;
+            }
             if (want_diff && !s_in_shadow && c->diff_passes < OVERLAY_DIFF_BUDGET) {
                 run_shadow_diff(cpu, c, addr);
                 return 1;
@@ -1155,6 +1168,7 @@ scan_candidates:
      * candidate hash match before native or diff execution. */
     if (!tried_live_sljit && s_active && overlay_cache_window_contains(phys) &&
         (s_diff_mode || s_sljit_live) && !s_in_shadow &&
+        !psx_get_in_exception() &&
         code_provider_sljit() != NULL) {
         tried_live_sljit = 1;
         try_sljit_region(addr);
@@ -1348,9 +1362,10 @@ static void run_shadow_diff(CPUState *cpu, Candidate *c, uint32_t addr) {
     uint8_t *ram  = memory_get_ram_ptr();
     uint8_t *spad = memory_get_scratchpad_ptr();
 
-    s_in_shadow = 1;
     int saved_supp = s_suppress_irq;
-    s_suppress_irq = 1;                 /* isolate computation; longjmp-safe */
+    s_in_shadow = 1;
+    s_suppress_irq = 1;                 /* align native callback cadence */
+    psx_interrupts_suppress_push();     /* block direct interp checks too */
     /* Validate ONE function at a time: nested OVERLAY calls run via the
      * INTERPRETER on BOTH passes (s_native_exec=0). Otherwise the native pass
      * dispatches each callee as its own native shard while the interp pass runs
@@ -1386,6 +1401,7 @@ static void run_shadow_diff(CPUState *cpu, Candidate *c, uint32_t addr) {
         c->device_touch = 1;
         s_shadow_skipped_dev++;
         g_psx_call_bail = 0;
+        psx_interrupts_suppress_pop();
         s_native_exec  = sv;
         s_suppress_irq = saved_supp;
         s_in_shadow    = 0;
@@ -1477,6 +1493,7 @@ static void run_shadow_diff(CPUState *cpu, Candidate *c, uint32_t addr) {
     memcpy(ram,  s_ramI,  SHADOW_RAM_SIZE);
     memcpy(spad, s_spadI, SHADOW_SPAD_SIZE);
     g_psx_call_bail = 0;
+    psx_interrupts_suppress_pop();
     s_native_exec  = sv;
     s_suppress_irq = saved_supp;
     s_in_shadow    = 0;
@@ -1507,10 +1524,12 @@ int overlay_loader_dump_shadow(char *out, int cap) {
     int n = 0;
     n += snprintf(out + n, cap - n,
         "{\"diff_mode\":%d,\"shadow_calls\":%llu,\"divergences\":%llu,"
-        "\"skipped_device\":%llu,\"blacklisted\":%llu,\"records\":[",
+        "\"skipped_device\":%llu,\"skipped_exception\":%llu,"
+        "\"blacklisted\":%llu,\"records\":[",
         s_diff_mode, (unsigned long long)s_shadow_calls,
         (unsigned long long)s_shadow_divs,
         (unsigned long long)s_shadow_skipped_dev,
+        (unsigned long long)s_shadow_skipped_exc,
         (unsigned long long)s_shadow_blacklisted);
     for (int i = 0; i < s_sdiv_n && n < cap - 200; i++) {
         ShadowDiv *d = &s_sdiv[i];
